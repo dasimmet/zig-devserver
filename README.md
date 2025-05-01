@@ -27,6 +27,7 @@ Naturally, DO NOT USE THIS IN PRODUCTION. This is a development tool only.
 
 ```zig
 // zig fetch --save git+https://github.com/dasimmet/zig-devserver.git
+
 pub fn build(b: *std.Build) void {
 const devserver = @import("devserver");
     const run_devserver = devserver.serveDir(b, .{
