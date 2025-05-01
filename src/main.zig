@@ -56,6 +56,9 @@ pub fn usage(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
         \\  watch {host} {port} {directory} # used from `zig build --watch` to auto-restart server
         \\  help # print usage
         \\
+        \\environment variables:
+        \\  ZIG_DEVSERVER_OPEN_BROWSER=/ # open browser at path
+        \\  PPID # id of parent process. stop forked progam if this id ends
     );
 }
 

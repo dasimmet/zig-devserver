@@ -36,8 +36,8 @@ pub const ServePath = union(enum) {
 
 pub fn serveDir(b: *std.Build, opt: ServerOptions) *Run {
     const this_dep = b.dependencyFromBuildZig(@This(), .{
-        .target = opt.target,
-        .optimize = opt.optimize,
+        .target = opt.target orelse b.graph.host,
+        .optimize = opt.optimize orelse .ReleaseFast,
     });
     return serveDirInternal(b, this_dep.artifact("devserver"), opt);
 }
