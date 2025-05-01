@@ -14,12 +14,21 @@ pub const ServerOptions = struct {
     // should the server fork and reload itself.
     // true by default if `--watch` is in zig build's `argv`
     watch: ?bool = null,
-    directory: union(enum) {
-        // a subpath in `zig-out`
-        install: []const u8,
-        // a generated directory in the cache or the sources
-        lazypath: LazyPath,
-    },
+    directory: ServePath,
+};
+
+pub const ServePath = union(enum) {
+    // a subpath in `zig-out`
+    install: []const u8,
+    // a generated directory in the cache or the sources
+    lazypath: LazyPath,
+    pub fn serveInstall(dir: []const u8) @This() {
+        return .{ .install = dir };
+    }
+
+    pub fn serveLazyPath(dir: LazyPath) @This() {
+        return .{ .lazypath = dir };
+    }
 };
 
 pub fn serveDir(b: *std.Build, opt: ServerOptions) *Run {
@@ -56,13 +65,26 @@ pub fn build(b: *std.Build) void {
     const install_html = b.addInstallFile(b.path("src/index.html"), "www/index.html");
     b.getInstallStep().dependOn(&install_html.step);
 
-    const watch = serveDirInternal(b, exe, .{
-        .port = b.option(u16, "port", "port to listen on") orelse 8080,
-        .open_browser = b.option([]const u8, "open-browser", "open the browser when server starts"),
-        .directory = .{ .install = "www" },
-    });
+    const port = b.option(u16, "port", "port to listen on") orelse 8080;
+    const open_browser = b.option([]const u8, "open-browser", "open the browser when server starts");
+    {
+        const watch = serveDirInternal(b, exe, .{
+            .port = port,
+            .open_browser = open_browser,
+            .directory = .serveInstall("www"),
+        });
 
-    b.step("run", "run the server").dependOn(&watch.step);
+        b.step("run", "run the server").dependOn(&watch.step);
+    }
+    {
+        const watch = serveDirInternal(b, exe, .{
+            .port = port,
+            .open_browser = open_browser,
+            .directory = .serveLazyPath(b.path("src")),
+        });
+
+        b.step("run-lazypath-src", "run the server on a lazypath in src").dependOn(&watch.step);
+    }
 }
 
 pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Run {

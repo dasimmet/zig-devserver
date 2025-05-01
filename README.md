@@ -44,9 +44,9 @@ pub fn build(b: *std.Build) void {
             "open the os default webbbrowser on first server launch",
         ) orelse "/",
 
-        // this union can accept a `install` path in `zig-out`
-        // or a `LazyPath`
-        .directory = .{ .install = "www" },
+        // either `serveInstall` => path in `zig-out`
+        // or a `serveLazyPath`
+        .directory = .serveInstall("www"),
     });
     b.step("dev", "run dev webserver").dependOn(&run_devserver.step);
 }
