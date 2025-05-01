@@ -266,9 +266,9 @@ fn handleDir(req: *Request, path: []const u8) !void {
         try response.writeAll("<a href=\"");
         try response.writeAll(entry.name);
         try response.writeAll("\"><li>");
-        try response.writeAll(entry.name);
-        try response.writeAll(" - ");
         try response.writeAll(@tagName(entry.kind));
+        try response.writeAll(" - ");
+        try response.writeAll(entry.name);
         try response.writeAll("</li></a>\n");
     }
     try response.writeAll("</ul></body></html>\n");

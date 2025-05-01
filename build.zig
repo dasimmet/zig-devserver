@@ -74,7 +74,7 @@ pub fn build(b: *std.Build) void {
         const watch = serveDirInternal(b, exe, .{
             .port = port,
             .open_browser = open_browser,
-            .directory = .serveInstall("www"),
+            .directory = .serveInstall(""),
         });
 
         b.step("run", "run the server").dependOn(&watch.step);
