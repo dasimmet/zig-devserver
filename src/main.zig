@@ -6,11 +6,13 @@ pub const std_options: std.Options = .{
 };
 const log = std.log;
 
-var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-
 pub fn main() !void {
+    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = general_purpose_allocator.deinit();
     const gpa = general_purpose_allocator.allocator();
     const args = try std.process.argsAlloc(gpa);
+    defer std.process.argsFree(gpa, args);
+
     log.info("server args: {s}", .{args});
 
     if (args.len < 2) {
