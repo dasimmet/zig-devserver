@@ -9,12 +9,6 @@ pub const std_options: std.Options = .{
 const log = std.log;
 
 var previous_server_was_shutdown = false;
-const open_command = switch (builtin.os.tag) {
-    .linux => "xdg-open",
-    .macos => "open",
-    .windows => "explorer.exe",
-    else => "",
-};
 
 pub fn main() !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
@@ -225,7 +219,9 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     }
 }
 
-fn failWithError(operation: []const u8, err: anyerror) noreturn {
-    log.err("Unrecoverable Failure: {s} encountered error {s}.", .{ operation, @errorName(err) });
-    std.process.exit(1);
-}
+const open_command = switch (builtin.os.tag) {
+    .linux => "xdg-open",
+    .macos => "open",
+    .windows => "explorer.exe",
+    else => "",
+};

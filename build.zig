@@ -7,6 +7,9 @@ const Run = Step.Run;
 const LazyPath = std.Build.LazyPath;
 
 pub const ServerOptions = struct {
+    target: ?ResolvedTarget = null,
+    optimize: ?OptimizeMode = null,
+
     host: []const u8 = "127.0.0.1",
     port: u16 = 0,
     // open the os default webbrowser on first launch,
@@ -33,8 +36,8 @@ pub const ServePath = union(enum) {
 
 pub fn serveDir(b: *std.Build, opt: ServerOptions) *Run {
     const this_dep = b.dependencyFromBuildZig(@This(), .{
-        .target = b.graph.host,
-        .optimize = .Debug,
+        .target = opt.target,
+        .optimize = opt.optimize,
     });
     return serveDirInternal(b, this_dep.artifact("devserver"), opt);
 }
