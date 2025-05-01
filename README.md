@@ -12,5 +12,6 @@ and then edit `src/index.html`
 
 ## References
 
+- <https://cookbook.ziglang.cc/05-02-http-post.html>
 - <https://github.com/andrewrk/mime.git>
 - <https://github.com/scottredig/zig-demo-webserver>
