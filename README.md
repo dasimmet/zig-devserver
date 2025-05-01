@@ -2,7 +2,7 @@
 
 a webserver that reloads the page when `zig build --watch` rebuilds your content
 
-test it with:
+try it with:
 
 ```
 zig build --watch watch
@@ -12,6 +12,14 @@ and then edit `src/index.html`.
 
 Only POSIX is supported, since reloading requires `fork()` ing the server
 to the background at the moment.
+
+The next launch of the server will send a request to the old instance to kill it.
+
+On html pages a small javascript is injected to check when the server was started.
+When the page receives a newer timestamp, a reload is triggered.
+
+To stop the forked server when `zig build --watch` is stopped,
+it sends `kill(ppid, 0)` signals back to it's parent process on request and end itself if needed.
 
 ## `build.zig` usage
 
@@ -35,3 +43,4 @@ run_devserver.step.dependOn(&www_install.step);
 - <https://cookbook.ziglang.cc/05-02-http-post.html>
 - <https://github.com/andrewrk/mime.git>
 - <https://github.com/scottredig/zig-demo-webserver>
+- <https://stackoverflow.com/questions/3043978/how-to-check-if-a-process-id-pid-exists>
