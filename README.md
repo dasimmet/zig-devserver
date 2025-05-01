@@ -27,20 +27,27 @@ Naturally, DO NOT USE THIS IN PRODUCTION. This is a development tool only.
 
 ```zig
 // zig fetch --save git+https://github.com/dasimmet/zig-devserver.git
+pub fn build(b: *std.Build) void {
 const devserver = @import("devserver");
-// in the build() function:
+    const run_devserver = devserver.serveDir(b, .{
+        // optionally provide a host ip. this is the default:
+        .host = "127.0.0.1",
 
-const run_devserver = devserver.serveDir(b, .{
-    // optionally provide a host ip. this is the default:
-    .host = "127.0.0.1",
-    // provide a port to listen on
-    .port = b.option(u16, "port", "dev server port") orelse 8080,
-    .open_browser = b.option(bool, "open-browser", "open the os default webbbrowser on server launch") orelse false,
-    // this can accept a `LazyPath`
-    // or a path in `zig-out`
-    .directory = .{ .install = "www" },
-});
-b.step("dev", "run dev webserver").dependOn(&run_devserver.step);
+        // provide a port to listen on
+        .port = b.option(u16, "port", "dev server port") orelse 8080,
+
+        .open_browser = b.option(
+            bool,
+            "open-browser",
+            "open the os default webbbrowser on server launch",
+        ) orelse false,
+
+        // this union can accept a `install` path in `zig-out`
+        // or a `LazyPath`
+        .directory = .{ .install = "www" },
+    });
+    b.step("dev", "run dev webserver").dependOn(&run_devserver.step);
+}
 ```
 
 ## References
