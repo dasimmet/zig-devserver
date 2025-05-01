@@ -1,13 +1,12 @@
 const std = @import("std");
-const mime = @import("mime");
 const builtin = @import("builtin");
-const Api = @import("Api.zig");
+
+const Request = @import("Request.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
 };
 const log = std.log;
-var start_timestamp: usize = 0;
 
 pub fn main() !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
@@ -94,7 +93,7 @@ pub fn notifyServer(gpa: std.mem.Allocator, port: u16, args: []const [:0]const u
         .allocator = gpa,
     };
     defer client.deinit();
-    const msg: Api = .{ .action = .shutdown };
+    const msg: Request.Api = .{ .action = .shutdown };
     var buf: [4096]u8 = undefined;
     const payload = try std.fmt.bufPrint(&buf, "{}\n", .{
         std.json.fmt(msg, .{
@@ -102,7 +101,7 @@ pub fn notifyServer(gpa: std.mem.Allocator, port: u16, args: []const [:0]const u
         }),
     });
 
-    var uri = try std.Uri.parse("http://127.0.0.1" ++ Api.endpoint);
+    var uri = try std.Uri.parse("http://127.0.0.1" ++ Request.Api.endpoint);
     uri.port = port;
 
     var req = try client.open(.POST, uri, .{ .server_header_buffer = &buf });
@@ -131,7 +130,7 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     var root_dir: std.fs.Dir = try std.fs.cwd().openDir(root_dir_path, .{});
     defer root_dir.close();
 
-    start_timestamp = @intCast(std.time.timestamp());
+    const start_time = std.time.timestamp();
     var request_pool: std.Thread.Pool = undefined;
     try request_pool.init(.{
         .allocator = gpa,
@@ -156,6 +155,7 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
 
         request.gpa = gpa;
         request.public_dir = root_dir;
+        request.start_time = start_time;
         request.conn = tcp_server.accept() catch |err| {
             switch (err) {
                 error.ConnectionAborted, error.ConnectionResetByPeer => {
@@ -187,223 +187,3 @@ fn failWithError(operation: []const u8, err: anyerror) noreturn {
     log.err("Unrecoverable Failure: {s} encountered error {s}.", .{ operation, @errorName(err) });
     std.process.exit(1);
 }
-
-const Request = struct {
-    // Fields are in initialization order.
-    // Initialized by main.
-    gpa: std.mem.Allocator,
-    public_dir: std.fs.Dir,
-    conn: std.net.Server.Connection,
-    // Initialized by handle.
-    allocator_arena: std.heap.ArenaAllocator,
-    allocator: std.mem.Allocator,
-    http: std.http.Server.Request,
-
-    // Not initialized in this code but utilized by http server.
-    buffer: [1024]u8,
-    response_buffer: [4000]u8,
-
-    fn handle(req: *Request) void {
-        defer req.gpa.destroy(req);
-        defer req.conn.stream.close();
-
-        req.allocator_arena = std.heap.ArenaAllocator.init(req.gpa);
-        defer req.allocator_arena.deinit();
-        req.allocator = req.allocator_arena.allocator();
-
-        var http_server = std.http.Server.init(req.conn, &req.buffer);
-        req.http = http_server.receiveHead() catch |err| {
-            if (err != error.HttpConnectionClosing) {
-                log.err("Error with getting request headers:{s}", .{@errorName(err)});
-                // TODO: We're supposed to server an error to the request on some of these
-                // error types, but the http server doesn't give us the response to write to,
-                // so we're not going to bother doing it manually.
-            }
-            return;
-        };
-        const api = req.handleApi() catch |err| {
-            log.warn("Error {s} responding to request from {any} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
-            return;
-        };
-        if (api) return;
-
-        req.handleFile() catch |err| {
-            log.warn("Error {s} responding to request from {any} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
-        };
-    }
-
-    const common_headers = [_]std.http.Header{
-        .{ .name = "connection", .value = "close" },
-        .{ .name = "Cache-Control", .value = "no-cache, no-store, must-revalidate" },
-    };
-
-    fn handleApi(req: *Request) !bool {
-        const path = req.http.head.target;
-        if (std.mem.eql(u8, path, Api.endpoint)) {
-            if (req.http.head.method == .POST) {
-                var buf: [4096]u8 = undefined;
-                const reader = try req.http.reader();
-                const message_size = try reader.readAll(&buf);
-                const message_str = buf[0..message_size];
-                log.info("api: {s}", .{message_str});
-                const msg = try std.json.parseFromSlice(
-                    Api,
-                    req.allocator,
-                    message_str,
-                    .{},
-                );
-                switch (msg.value.action) {
-                    .shutdown => std.process.exit(0),
-                    .client_reload_check => {
-                        if (msg.value.start_time) |start_time| {
-                            if (start_time == start_timestamp) {
-                                std.time.sleep(10 * std.time.ns_per_s);
-                            }
-                        } else {
-                            std.time.sleep(10 * std.time.ns_per_s);
-                        }
-                        var res_buf: [64]u8 = undefined;
-                        const res = try std.fmt.bufPrint(&res_buf, "{}", .{std.json.fmt(.{
-                            .start_time = start_timestamp,
-                        }, .{})});
-                        try req.http.respond(res, .{});
-                        return true;
-                    },
-                    // else => return error.MessageNotImplemented,
-                }
-            }
-        }
-        return false;
-    }
-
-    fn handleFile(req: *Request) !void {
-        var path = req.http.head.target;
-
-        if (std.mem.indexOf(u8, path, "..")) |_| {
-            req.serveError("'..' not allowed in URLs", .bad_request);
-
-            // TODO: Allow relative paths while ensuring that directories
-            // outside of the served directory can never be accessed.
-            return error.BadPath;
-        }
-
-        if (std.mem.endsWith(u8, path, "/")) {
-            path = try std.fmt.allocPrint(req.allocator, "{s}{s}", .{
-                path,
-                "index.html",
-            });
-        }
-
-        if (path.len < 1 or path[0] != '/') {
-            req.serveError("bad request path.", .bad_request);
-            return error.BadPath;
-        }
-
-        if (std.mem.eql(u8, path, Api.js_endpoint)) {
-            const reload_js = @embedFile("reload.js");
-            return req.http.respond(reload_js, .{
-                .extra_headers = &([_]std.http.Header{
-                    .{ .name = "content-type", .value = "application/javascript" },
-                } ++ common_headers),
-            });
-        }
-
-        path = path[1 .. std.mem.indexOfScalar(u8, path, '?') orelse path.len];
-
-        const mime_type = mime.extension_map.get(std.fs.path.extension(path)) orelse
-            .@"application/octet-stream";
-
-        const file = req.public_dir.openFile(path, .{}) catch |err| switch (err) {
-            error.FileNotFound => {
-                req.serveError(null, .not_found);
-                if (std.mem.eql(u8, path, "favicon.ico")) {
-                    return; // Surpress error logging.
-                }
-                return err;
-            },
-            else => {
-                req.serveError("accessing resource", .internal_server_error);
-                return err;
-            },
-        };
-        defer file.close();
-
-        const metadata = file.metadata() catch |err| {
-            req.serveError("accessing resource", .internal_server_error);
-            return err;
-        };
-        if (metadata.kind() == .directory) {
-            const location = try std.fmt.allocPrint(
-                req.allocator,
-                "{s}/",
-                .{req.http.head.target},
-            );
-            try req.http.respond("redirecting...", .{
-                .status = .see_other,
-                .extra_headers = &([_]std.http.Header{
-                    .{ .name = "location", .value = location },
-                    .{ .name = "content-type", .value = "text/html" },
-                } ++ common_headers),
-            });
-            return;
-        }
-
-        const content_type = switch (mime_type) {
-            inline else => |mt| blk: {
-                if (std.mem.startsWith(u8, @tagName(mt), "text")) {
-                    break :blk @tagName(mt) ++ "; charset=utf-8";
-                }
-                break :blk @tagName(mt);
-            },
-        };
-        if (mime_type == .@"text/html") {
-            const content = try file.readToEndAlloc(req.allocator, std.math.maxInt(u32));
-            defer req.allocator.free(content);
-
-            var response = req.http.respondStreaming(.{
-                .send_buffer = try req.allocator.alloc(u8, content.len + Api.injected_js.len),
-                // .content_length = metadata.size(),
-                .respond_options = .{
-                    .extra_headers = &([_]std.http.Header{
-                        .{ .name = "content-type", .value = content_type },
-                    } ++ common_headers),
-                },
-            });
-            if (std.mem.indexOf(u8, content, "<head>")) |head_idx| {
-                const post_head_pos = head_idx + "<head>".len;
-                _ = try response.writer().write(content[0..post_head_pos]);
-                _ = try response.writer().write(Api.injected_js);
-                _ = try response.writer().write(content[post_head_pos..]);
-            } else {
-                log.warn("<head> not found in html: {s}\ncannot inject reload js", .{path});
-                _ = try response.writer().write(content);
-            }
-            return response.end();
-        }
-
-        var response = req.http.respondStreaming(.{
-            .send_buffer = try req.allocator.alloc(u8, 4000),
-            // .content_length = metadata.size(),
-            .respond_options = .{
-                .extra_headers = &([_]std.http.Header{
-                    .{ .name = "content-type", .value = content_type },
-                } ++ common_headers),
-            },
-        });
-        try response.writer().writeFile(file);
-        return response.end();
-    }
-
-    fn serveError(req: *Request, comptime reason: ?[]const u8, comptime status: std.http.Status) void {
-        const sep = if (reason) |_| ": " else ".";
-        const text = std.fmt.comptimePrint("{d} {s}{s}{s}", .{ @intFromEnum(status), comptime status.phrase().?, sep, reason orelse "" });
-        req.http.respond(text, .{
-            .status = status,
-            .extra_headers = &([_]std.http.Header{
-                .{ .name = "content-type", .value = "text/text" },
-            } ++ common_headers),
-        }) catch |err| {
-            log.warn("Error {s} serving error text {s}", .{ @errorName(err), text });
-        };
-    }
-};
