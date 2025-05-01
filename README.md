@@ -8,7 +8,24 @@ test it with:
 zig build --watch watch
 ```
 
-and then edit `src/index.html`
+and then edit `src/index.html`.
+
+## `build.zig` usage
+
+```zig
+// zig fetch --save git+https://github.com/dasimmet/zig-devserver.git
+const devserver = @import("devserver");
+// in the build() function:
+
+const run_devserver = devserver.serveDir(b, .{
+    .port = b.option(u16, "port", "dev server port") orelse 8080,
+    .directory = .{ .install = "www" }, // this can also accept a `LazyPath`
+});
+b.step("dev", "run dev webserver").dependOn(&run_devserver.step);
+
+// ...  create a step `www_install` that will populate `zig-out/www`
+run_devserver.step.dependOn(&www_install.step);
+```
 
 ## References
 
