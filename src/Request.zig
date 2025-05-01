@@ -261,7 +261,9 @@ fn handleDir(req: *Request, path: []const u8) !void {
     try response.writeAll(style);
     try response.writeAll("\n</style></head><body><ul>\n");
     try response.writeAll("<a href=\".\"><li>.</li></a>");
-    try response.writeAll("<a href=\"..\"><li>..</li></a>");
+    if (!std.mem.eql(u8, path, ".")) {
+        try response.writeAll("<a href=\"..\"><li>..</li></a>");
+    }
     while (try iter.next()) |entry| {
         try response.writeAll("<a href=\"");
         try response.writeAll(entry.name);
