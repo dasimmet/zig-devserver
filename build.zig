@@ -19,5 +19,9 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);
+    run.has_side_effects = true;
+    if (b.args) |args| {
+        run.addArgs(args);
+    }
     b.step("run", "run the server").dependOn(&run.step);
 }

@@ -8,20 +8,66 @@ const log = std.log;
 
 var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
 
-pub fn main() void {
+pub fn main() !void {
     const gpa = general_purpose_allocator.allocator();
-    const args = std.process.argsAlloc(gpa) catch |err| failWithError("Parse arguments", err);
+    const args = try std.process.argsAlloc(gpa);
     log.info("server args: {s}", .{args});
 
-    // if (args.len < 2) {
-    //     failWithError("Parse arguments", error.IncorrectNumberOfArguments);
-    // }
-    if (args.len != 3) {
-        failWithError("Parse arguments", error.IncorrectNumberOfArguments);
+    if (args.len < 2) {
+        try usage(gpa, args);
+        std.process.exit(1);
     }
 
-    const port = std.fmt.parseInt(u16, args[1], 10) catch |err| failWithError("Parse port", err);
-    const root_dir_path = args[2];
+    inline for (&.{
+        .{ "-h", usage },
+        .{ "-?", usage },
+        .{ "/h", usage },
+        .{ "/?", usage },
+        .{ "--help", usage },
+        .{ "help", usage },
+        .{ "serve", startServer },
+        .{ "notify", notifyServer },
+    }) |cmd| {
+        if (std.mem.eql(u8, args[1], cmd[0])) {
+            return cmd[1](gpa, args[2..]);
+        }
+    }
+    std.log.err("unknown subcommand: {s}", .{args[1]});
+    try usage(gpa, args[2..]);
+    std.process.exit(1);
+}
+
+pub fn usage(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
+    _ = gpa;
+    const stdout = std.io.getStdOut().writer();
+    try stdout.writeAll("args: ");
+    for (args) |arg| {
+        try stdout.print("{s} ", .{arg});
+    }
+    try stdout.writeAll(
+        \\usage: devserver {-h|--help|-?|help|serve|notify} [subcommand args]
+        \\
+        \\subcommand usage:
+        \\  serve {port} {directory}
+        \\  notify
+        \\  help
+        \\
+    );
+}
+
+pub fn notifyServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
+    _ = gpa;
+    _ = args;
+    @panic("TODO: notify is not implemented yet");
+}
+
+pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
+    if (args.len != 2) {
+        return error.IncorrectNumberOfArguments;
+    }
+
+    const port = std.fmt.parseInt(u16, args[0], 10) catch |err| failWithError("Parse port", err);
+    const root_dir_path = args[1];
 
     var root_dir: std.fs.Dir = std.fs.cwd().openDir(root_dir_path, .{}) catch |err| failWithError("Open serving directory", err);
     defer root_dir.close();
@@ -66,8 +112,8 @@ pub fn main() void {
     }
 }
 
-fn failWithError(operation: []const u8, err: anytype) noreturn {
-    std.debug.print("Unrecoverable Failure: {s} encountered error {s}.\n", .{ operation, @errorName(err) });
+fn failWithError(operation: []const u8, err: anyerror) noreturn {
+    std.log.err("Unrecoverable Failure: {s} encountered error {s}.", .{ operation, @errorName(err) });
     std.process.exit(1);
 }
 
