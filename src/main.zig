@@ -71,7 +71,9 @@ pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     }
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) {
-        log.err("port 0 is not supported with 'watch'", .{});
+        log.err("port 0 is not supported with 'watch'.", .{});
+        log.err("we cannot terminate a forked server on an unknown port.", .{});
+        return error.Port0NotSupported;
     }
     if (!try std.process.hasEnvVar(gpa, "PPID")) {
         std.log.err("env var PPID not found. watch will fork and never stop otherwise.", .{});
