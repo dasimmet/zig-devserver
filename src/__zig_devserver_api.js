@@ -1,6 +1,6 @@
 
 window.addEventListener("load", () => {
-    console.log("start reload.js");
+    console.log("start __zig_devserver_api.js");
     window.__zig_devserver_reload_running = false;
     window.__zig_devserver_reload_time = 0;
     window.setInterval(async () => {
@@ -31,3 +31,4 @@ window.addEventListener("load", () => {
         }
     }, 500);
 });
+

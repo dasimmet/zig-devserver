@@ -123,7 +123,7 @@ fn handleFile(req: *Request) !void {
     }
 
     if (std.mem.eql(u8, path, Api.js_endpoint)) {
-        const reload_js = @embedFile("reload.js");
+        const reload_js = @embedFile("__zig_devserver_api.js");
         return req.http.respond(reload_js, .{
             .extra_headers = &([_]std.http.Header{
                 .{ .name = "content-type", .value = "application/javascript" },
