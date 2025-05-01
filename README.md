@@ -5,7 +5,7 @@ a webserver that reloads the page when `zig build --watch` rebuilds your content
 try it with:
 
 ```
-zig build --watch watch -Dopen-browser
+zig build run --watch -Dopen-browser
 ```
 
 and then edit `src/index.html`.
