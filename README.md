@@ -1,14 +1,14 @@
-# Zig Dev Webserver
+# Zig Dev Http Webserver
 
 a webserver that reloads the page when `zig build --watch` rebuilds your content
 
 try it with:
 
 ```
-zig build run --watch -Dopen-browser
+zig build run --watch -Dopen-browser=index.html
 ```
 
-and then edit `src/index.html`.
+and then edit `src/index.html` and have the browser tab reload.
 
 Only POSIX is supported, since reloading requires `fork()` ing the server
 to the background at the moment.
@@ -37,11 +37,12 @@ const devserver = @import("devserver");
         // provide a port to listen on
         .port = b.option(u16, "port", "dev server port") orelse 8080,
 
+        // optionally provide a path to open
         .open_browser = b.option(
-            bool,
+            []const u8,
             "open-browser",
-            "open the os default webbbrowser on server launch",
-        ) orelse false,
+            "open the os default webbbrowser on first server launch",
+        ) orelse "/",
 
         // this union can accept a `install` path in `zig-out`
         // or a `LazyPath`

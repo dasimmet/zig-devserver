@@ -166,20 +166,22 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     if (!previous_server_was_shutdown) {
         if (std.process.getEnvVarOwned(gpa, "ZIG_DEVSERVER_OPEN_BROWSER") catch null) |open_browser| {
             defer gpa.free(open_browser);
-            if (open_browser.len == 1 and open_browser[0] == '1') {
-                const url_str = try std.fmt.allocPrint(
-                    gpa,
-                    "http://{any}",
-                    .{tcp_server.listen_address.in},
-                );
-                defer gpa.free(url_str);
-                const res = try std.process.Child.run(.{
-                    .allocator = gpa,
-                    .argv = &.{ open_command, url_str },
-                });
-                gpa.free(res.stderr);
-                gpa.free(res.stdout);
-            }
+            const url_str = try std.fmt.allocPrint(
+                gpa,
+                "http://{any}/{s}",
+                .{
+                    tcp_server.listen_address.in,
+                    if (open_browser.len > 0 and open_browser[0] == '/') open_browser[1..] else open_browser,
+                },
+            );
+            defer gpa.free(url_str);
+            std.log.info("opening in browser: {s}", .{url_str});
+            const res = try std.process.Child.run(.{
+                .allocator = gpa,
+                .argv = &.{ open_command, url_str },
+            });
+            gpa.free(res.stderr);
+            gpa.free(res.stdout);
         }
     }
 
