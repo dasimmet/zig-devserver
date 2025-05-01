@@ -30,12 +30,12 @@ const devserver = @import("devserver");
 
 const run_devserver = devserver.serveDir(b, .{
     .port = b.option(u16, "port", "dev server port") orelse 8080,
-    .directory = .{ .install = "www" }, // this can also accept a `LazyPath`
+
+    // this can accept a `LazyPath`
+    // or a path in `zig-out`
+    .directory = .{ .install = "www" }, 
 });
 b.step("dev", "run dev webserver").dependOn(&run_devserver.step);
-
-// ...  create a step `www_install` that will populate `zig-out/www`
-run_devserver.step.dependOn(&www_install.step);
 ```
 
 ## References

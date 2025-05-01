@@ -49,11 +49,12 @@ pub fn build(b: *std.Build) void {
     b.step("run", "run the server").dependOn(&run.step);
 
     const install_html = b.addInstallFile(b.path("src/index.html"), "www/index.html");
+    b.getInstallStep().dependOn(&install_html.step);
+
     const watch = serveDirInternal(b, exe, .{
         .port = b.option(u16, "port", "port to listen on") orelse 8080,
         .directory = .{ .install = "www" },
     });
-    watch.step.dependOn(&install_html.step);
 
     b.step("watch", "run the server").dependOn(&watch.step);
 }
@@ -84,7 +85,10 @@ pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Ru
     run.addArg(if (watch) "watch" else "serve");
     run.addArg(b.fmt("{d}", .{opt.port}));
     switch (opt.directory) {
-        .install => |subdir| run.addArg(b.pathJoin(&.{ b.install_path, subdir })),
+        .install => |subdir| {
+            run.addArg(b.pathJoin(&.{ b.install_path, subdir }));
+            run.step.dependOn(b.getInstallStep());
+        },
         .lazypath => |lp| run.addFileArg(lp),
     }
     return run;
