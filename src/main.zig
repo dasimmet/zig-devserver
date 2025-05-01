@@ -37,6 +37,7 @@ pub fn main() !void {
         .{ "/?", usage },
         .{ "--help", usage },
         .{ "help", usage },
+        .{ "usage", usage },
         .{ "serve", startServer },
         .{ "watch", watchServer },
     }) |cmd| {
@@ -57,18 +58,18 @@ pub fn usage(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
         \\usage: devserver {-h|--help|-?|help|serve|notify} [subcommand args]
         \\
         \\subcommand usage:
-        \\  serve {port} {directory}
-        \\  watch {port} {directory}
-        \\  help
+        \\  serve {host} {port} {directory} # server a directory on a given host and port
+        \\  watch {host} {port} {directory} # used from `zig build --watch` to auto-restart server
+        \\  help # print usage
         \\
     );
 }
 
 pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
-    if (args.len != 2) {
+    if (args.len != 3) {
         return error.IncorrectNumberOfArguments;
     }
-    const port = try std.fmt.parseInt(u16, args[0], 10);
+    const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) {
         log.err("port 0 is not supported with 'watch'", .{});
     }
@@ -78,7 +79,7 @@ pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     }
 
     previous_server_was_shutdown = true;
-    notifyServer(gpa, port, args) catch |err| switch (err) {
+    notifyServer(gpa, args[0], port) catch |err| switch (err) {
         error.ConnectionRefused => {
             previous_server_was_shutdown = false;
         },
@@ -98,8 +99,7 @@ pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     return startServer(smp, args);
 }
 
-pub fn notifyServer(gpa: std.mem.Allocator, port: u16, args: []const [:0]const u8) !void {
-    _ = args;
+pub fn notifyServer(gpa: std.mem.Allocator, host: []const u8, port: u16) !void {
     var client = std.http.Client{
         .allocator = gpa,
     };
@@ -112,7 +112,13 @@ pub fn notifyServer(gpa: std.mem.Allocator, port: u16, args: []const [:0]const u
         }),
     });
 
-    var uri = try std.Uri.parse("http://127.0.0.1" ++ Request.Api.endpoint);
+    var api_url_buf: [128]u8 = undefined;
+    const api_url = try std.fmt.bufPrint(
+        &api_url_buf,
+        "http://{s}" ++ Request.Api.endpoint,
+        .{host},
+    );
+    var uri = try std.Uri.parse(api_url);
     uri.port = port;
 
     var req = try client.open(.POST, uri, .{ .server_header_buffer = &buf });
@@ -131,13 +137,14 @@ pub fn notifyServer(gpa: std.mem.Allocator, port: u16, args: []const [:0]const u
 }
 
 pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
-    if (args.len != 2) {
+    if (args.len != 3) {
         return error.IncorrectNumberOfArguments;
     }
 
-    const port = try std.fmt.parseInt(u16, args[0], 10);
-    const root_dir_path = args[1];
+    const host = args[0];
+    const port = try std.fmt.parseInt(u16, args[1], 10);
 
+    const root_dir_path = args[2];
     var root_dir: std.fs.Dir = try std.fs.cwd().openDir(root_dir_path, .{});
     defer root_dir.close();
 
@@ -148,7 +155,7 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     });
     defer request_pool.deinit();
 
-    const address = try std.net.Address.parseIp("127.0.0.1", port);
+    const address = try std.net.Address.parseIp(host, port);
     var tcp_server = try address.listen(.{
         .reuse_address = true,
     });
@@ -157,7 +164,7 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     log.warn("\x1b[2K\rServing website at http://{any}/\n", .{tcp_server.listen_address.in});
 
     if (!previous_server_was_shutdown) {
-        if (std.process.getEnvVarOwned(gpa, "OPEN_BROWSER") catch null) |open_browser| {
+        if (std.process.getEnvVarOwned(gpa, "ZIG_DEVSERVER_OPEN_BROWSER") catch null) |open_browser| {
             defer gpa.free(open_browser);
             if (open_browser.len == 1 and open_browser[0] == '1') {
                 const url_str = try std.fmt.allocPrint(

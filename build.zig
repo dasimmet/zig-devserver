@@ -7,6 +7,7 @@ const Run = Step.Run;
 const LazyPath = std.Build.LazyPath;
 
 pub const ServerOptions = struct {
+    host: []const u8 = "127.0.0.1",
     port: u16 = 0,
     // open the os default webbrowser on first launch,
     open_browser: bool = false,
@@ -50,7 +51,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run.addArgs(args);
     }
-    b.step("run", "run the server").dependOn(&run.step);
+    b.step("run-with-args", "run the server binary with arguments").dependOn(&run.step);
 
     const install_html = b.addInstallFile(b.path("src/index.html"), "www/index.html");
     b.getInstallStep().dependOn(&install_html.step);
@@ -61,7 +62,7 @@ pub fn build(b: *std.Build) void {
         .directory = .{ .install = "www" },
     });
 
-    b.step("watch", "run the server").dependOn(&watch.step);
+    b.step("run", "run the server").dependOn(&watch.step);
 }
 
 pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Run {
@@ -88,6 +89,7 @@ pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Ru
     }
 
     run.addArg(if (watch) "watch" else "serve");
+    run.addArg(opt.host);
     run.addArg(b.fmt("{d}", .{opt.port}));
     switch (opt.directory) {
         .install => |subdir| {
@@ -96,7 +98,7 @@ pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Ru
         },
         .lazypath => |lp| run.addFileArg(lp),
     }
-    if (opt.open_browser) run.setEnvironmentVariable("OPEN_BROWSER", "1");
+    if (opt.open_browser) run.setEnvironmentVariable("ZIG_DEVSERVER_OPEN_BROWSER", "1");
     return run;
 }
 

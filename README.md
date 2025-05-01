@@ -31,9 +31,11 @@ const devserver = @import("devserver");
 // in the build() function:
 
 const run_devserver = devserver.serveDir(b, .{
+    // optionally provide a host ip. this is the default:
+    .host = "127.0.0.1",
     // provide a port to listen on
     .port = b.option(u16, "port", "dev server port") orelse 8080,
-    .open_browser = b.option(bool, "open-browser", "open the os default webbbrowser") orelse false,
+    .open_browser = b.option(bool, "open-browser", "open the os default webbbrowser on server launch") orelse false,
     // this can accept a `LazyPath`
     // or a path in `zig-out`
     .directory = .{ .install = "www" },
