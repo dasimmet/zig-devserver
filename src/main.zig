@@ -1,5 +1,6 @@
 const std = @import("std");
 const mime = @import("mime");
+const builtin = @import("builtin");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -28,13 +29,13 @@ pub fn main() !void {
         .{ "--help", usage },
         .{ "help", usage },
         .{ "serve", startServer },
-        .{ "notify", notifyServer },
+        .{ "watch", watchServer },
     }) |cmd| {
         if (std.mem.eql(u8, args[1], cmd[0])) {
             return cmd[1](gpa, args[2..]);
         }
     }
-    std.log.err("unknown subcommand: {s}", .{args[1]});
+    log.err("unknown subcommand: {s}", .{args[1]});
     try usage(gpa, args[2..]);
     std.process.exit(1);
 }
@@ -42,10 +43,7 @@ pub fn main() !void {
 pub fn usage(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     _ = gpa;
     const stdout = std.io.getStdOut().writer();
-    try stdout.writeAll("args: ");
-    for (args) |arg| {
-        try stdout.print("{s} ", .{arg});
-    }
+    try stdout.print("args: {s}\n", .{args});
     try stdout.writeAll(
         \\usage: devserver {-h|--help|-?|help|serve|notify} [subcommand args]
         \\
@@ -57,10 +55,31 @@ pub fn usage(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     );
 }
 
-pub fn notifyServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
+pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     _ = gpa;
-    _ = args;
-    @panic("TODO: notify is not implemented yet");
+    if (args.len != 2) {
+        return error.IncorrectNumberOfArguments;
+    }
+    const port = try std.fmt.parseInt(u16, args[0], 10);
+    if (port == 0) {
+        log.err("port 0 is not supported with 'watch'", .{});
+    }
+
+    const forkpid = try std.posix.fork();
+
+    if (forkpid < 0) {
+        return error.ForkFailed;
+    } else if (forkpid > 0) {
+        // we stop the parent process
+        std.process.exit(0);
+    }
+
+    const pid = std.os.linux.getpid();
+    const smp = std.heap.smp_allocator;
+
+    log.info("\n\nfork running: {d}\n\n", .{pid});
+
+    return startServer(smp, args);
 }
 
 pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
@@ -68,30 +87,35 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
         return error.IncorrectNumberOfArguments;
     }
 
-    const port = std.fmt.parseInt(u16, args[0], 10) catch |err| failWithError("Parse port", err);
+    const port = try std.fmt.parseInt(u16, args[0], 10);
     const root_dir_path = args[1];
 
-    var root_dir: std.fs.Dir = std.fs.cwd().openDir(root_dir_path, .{}) catch |err| failWithError("Open serving directory", err);
+    var root_dir: std.fs.Dir = try std.fs.cwd().openDir(root_dir_path, .{});
     defer root_dir.close();
 
     var request_pool: std.Thread.Pool = undefined;
-    request_pool.init(.{
+    try request_pool.init(.{
         .allocator = gpa,
-    }) catch |err| failWithError("Start webserver threads", err);
+    });
+    defer request_pool.deinit();
 
-    const address = std.net.Address.parseIp("127.0.0.1", port) catch |err| failWithError("obtain ip", err);
-    var tcp_server = address.listen(.{
+    const address = try std.net.Address.parseIp("127.0.0.1", port);
+    var tcp_server = try address.listen(.{
         .reuse_port = true,
         .reuse_address = true,
-    }) catch |err| failWithError("listen", err);
+    });
     defer tcp_server.deinit();
 
     log.warn("\x1b[2K\rServing website at http://{any}/\n", .{tcp_server.listen_address.in});
 
+    const maybe_ppid: ?std.posix.pid_t = blk: {
+        const ppid = std.process.getEnvVarOwned(gpa, "PPID") catch break :blk null;
+        break :blk std.fmt.parseInt(std.posix.pid_t, ppid, 10) catch null;
+    };
+
     accept: while (true) {
-        const request = gpa.create(Request) catch |err| {
-            failWithError("allocating request", err);
-        };
+        const request = try gpa.create(Request);
+
         request.gpa = gpa;
         request.public_dir = root_dir;
         request.conn = tcp_server.accept() catch |err| {
@@ -103,8 +127,15 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
                 },
                 else => {},
             }
-            failWithError("accept connection", err);
+            return err;
         };
+
+        if (maybe_ppid) |ppid| {
+            std.posix.kill(ppid, 0) catch |err| {
+                log.info("parent process {d} not found: {}. exiting devserver", .{ ppid, err });
+                return;
+            };
+        }
 
         request_pool.spawn(Request.handle, .{request}) catch |err| {
             log.err("Error spawning request response thread: {s}", .{@errorName(err)});
@@ -115,7 +146,7 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
 }
 
 fn failWithError(operation: []const u8, err: anyerror) noreturn {
-    std.log.err("Unrecoverable Failure: {s} encountered error {s}.", .{ operation, @errorName(err) });
+    log.err("Unrecoverable Failure: {s} encountered error {s}.", .{ operation, @errorName(err) });
     std.process.exit(1);
 }
 
