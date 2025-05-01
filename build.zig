@@ -8,6 +8,9 @@ const LazyPath = std.Build.LazyPath;
 
 pub const ServerOptions = struct {
     port: u16 = 0,
+    // should the server fork and reload itself.
+    // true by default if `--watch` is in zig build's `argv`
+    watch: ?bool = null,
     directory: union(enum) {
         install: []const u8,
         lazypath: LazyPath,
@@ -65,13 +68,16 @@ pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Ru
     if (maybe_ppid) |ppid| {
         run.setEnvironmentVariable("PPID", ppid);
     }
-    var watch = false;
-    {
+    var watch = opt.watch orelse false;
+    if (opt.watch != null and opt.watch.?) {
         // TODO: find a better way to determine we are watching
         const args = std.process.argsAlloc(b.allocator) catch unreachable;
         defer std.process.argsFree(b.allocator, args);
         for (args) |arg| {
-            if (std.mem.eql(u8, arg, "--watch")) watch = true;
+            if (std.mem.eql(u8, arg, "--watch")) {
+                watch = true;
+                break;
+            }
         }
     }
 

@@ -10,6 +10,9 @@ zig build --watch watch
 
 and then edit `src/index.html`.
 
+Only POSIX is supported, since reloading requires `fork()` ing the server
+to the background at the moment.
+
 ## `build.zig` usage
 
 ```zig
