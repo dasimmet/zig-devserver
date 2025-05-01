@@ -1,7 +1,7 @@
 const std = @import("std");
 const mime = @import("mime");
 const builtin = @import("builtin");
-const Message = @import("Message.zig");
+const Api = @import("Api.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -51,7 +51,6 @@ pub fn usage(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
         \\subcommand usage:
         \\  serve {port} {directory}
         \\  watch {port} {directory}
-        \\  notify
         \\  help
         \\
     );
@@ -94,13 +93,13 @@ pub fn notifyServer(gpa: std.mem.Allocator, port: u16, args: []const [:0]const u
         .allocator = gpa,
     };
     defer client.deinit();
-    const msg: Message = .{ .action = .shutdown };
+    const msg: Api = .{ .action = .shutdown };
     var buf: [4096]u8 = undefined;
     const payload = try std.fmt.bufPrint(&buf, "{}\n", .{
         std.json.fmt(msg, .{}),
     });
 
-    var uri = try std.Uri.parse("http://127.0.0.1" ++ Message.endpoint);
+    var uri = try std.Uri.parse("http://127.0.0.1" ++ Api.endpoint);
     uri.port = port;
 
     var req = try client.open(.POST, uri, .{ .server_header_buffer = &buf });
@@ -218,9 +217,11 @@ const Request = struct {
             }
             return;
         };
-        req.handleMessage() catch |err| {
+        const api = req.handleApi() catch |err| {
             log.warn("Error {s} responding to request from {any} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
+            return;
         };
+        if (api) return;
 
         req.handleFile() catch |err| {
             log.warn("Error {s} responding to request from {any} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
@@ -232,26 +233,33 @@ const Request = struct {
         .{ .name = "Cache-Control", .value = "no-cache, no-store, must-revalidate" },
     };
 
-    fn handleMessage(req: *Request) !void {
+    fn handleApi(req: *Request) !bool {
         const path = req.http.head.target;
-        log.debug("path: {s}", .{path});
-        if (std.mem.eql(u8, path, Message.endpoint)) {
+        if (std.mem.eql(u8, path, Api.endpoint)) {
             if (req.http.head.method == .POST) {
                 var buf: [4096]u8 = undefined;
                 const reader = try req.http.reader();
-                const message_size = try reader.read(&buf);
+                const message_size = try reader.readAll(&buf);
+                const message_str = buf[0..message_size];
+                log.info("api: {s}", .{message_str});
                 const msg = try std.json.parseFromSlice(
-                    Message,
+                    Api,
                     req.allocator,
-                    buf[0..message_size],
+                    message_str,
                     .{},
                 );
                 switch (msg.value.action) {
                     .shutdown => std.process.exit(0),
-                    else => return error.MessageNotImplemented,
+                    .client_reload_check => {
+                        std.time.sleep(10 * std.time.ns_per_s);
+                        try req.http.respond("no", .{});
+                        return true;
+                    },
+                    // else => return error.MessageNotImplemented,
                 }
             }
         }
+        return false;
     }
 
     fn handleFile(req: *Request) !void {
@@ -275,6 +283,15 @@ const Request = struct {
         if (path.len < 1 or path[0] != '/') {
             req.serveError("bad request path.", .bad_request);
             return error.BadPath;
+        }
+
+        if (std.mem.eql(u8, path, Api.js_endpoint)) {
+            const reload_js = @embedFile("reload.js");
+            return req.http.respond(reload_js, .{
+                .extra_headers = &([_]std.http.Header{
+                    .{ .name = "content-type", .value = "application/javascript" },
+                } ++ common_headers),
+            });
         }
 
         path = path[1 .. std.mem.indexOfScalar(u8, path, '?') orelse path.len];
@@ -325,6 +342,30 @@ const Request = struct {
                 break :blk @tagName(mt);
             },
         };
+        if (mime_type == .@"text/html") {
+            const content = try file.readToEndAlloc(req.allocator, std.math.maxInt(u32));
+            defer req.allocator.free(content);
+
+            var response = req.http.respondStreaming(.{
+                .send_buffer = try req.allocator.alloc(u8, content.len + Api.injected_js.len),
+                // .content_length = metadata.size(),
+                .respond_options = .{
+                    .extra_headers = &([_]std.http.Header{
+                        .{ .name = "content-type", .value = content_type },
+                    } ++ common_headers),
+                },
+            });
+            if (std.mem.indexOf(u8, content, "<head>")) |head_idx| {
+                const post_head_pos = head_idx + "<head>".len;
+                _ = try response.writer().write(content[0..post_head_pos]);
+                _ = try response.writer().write(Api.injected_js);
+                _ = try response.writer().write(content[post_head_pos..]);
+            } else {
+                log.warn("<head> not found in html: {s}\ncannot inject reload js", .{path});
+                _ = try response.writer().write(content);
+            }
+            return response.end();
+        }
 
         var response = req.http.respondStreaming(.{
             .send_buffer = try req.allocator.alloc(u8, 4000),
