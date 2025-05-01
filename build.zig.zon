@@ -1,0 +1,19 @@
+.{
+    .name = .devserver,
+    .fingerprint = 0x1b9afb9db89b6f99,
+    .version = "0.0.0",
+    .dependencies = .{
+        .mime = .{
+            .url = "git+https://github.com/andrewrk/mime.git#7c61852d1408559cfea7d999ab81524f05678182",
+            .hash = "mime-3.0.0-zwmL-6wgAADuFwn7gr-_DAQDGJdIim94aDIPa6qO-6GT",
+        },
+    },
+    .paths = .{
+        "src",
+        "build",
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+        "README.md",
+    },
+}
