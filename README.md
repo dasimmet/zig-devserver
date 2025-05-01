@@ -44,3 +44,4 @@ run_devserver.step.dependOn(&www_install.step);
 - <https://github.com/andrewrk/mime.git>
 - <https://github.com/scottredig/zig-demo-webserver>
 - <https://stackoverflow.com/questions/3043978/how-to-check-if-a-process-id-pid-exists>
+- <https://ziggit.dev/t/build-zig-webserver/7078/4>
