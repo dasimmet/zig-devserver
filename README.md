@@ -21,6 +21,8 @@ When the page receives a newer timestamp, a reload is triggered.
 To stop the forked server when `zig build --watch` is stopped,
 it sends `kill(ppid, 0)` signals back to it's parent process on request and end itself if needed.
 
+Naturally, DO NOT USE THIS IN PRODUCTION. This is a development tool only.
+
 ## `build.zig` usage
 
 ```zig
