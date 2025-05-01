@@ -8,6 +8,14 @@ pub const std_options: std.Options = .{
 };
 const log = std.log;
 
+var previous_server_was_shutdown = false;
+const open_command = switch (builtin.os.tag) {
+    .linux => "xdg-open",
+    .macos => "open",
+    .windows => "explorer.exe",
+    else => "",
+};
+
 pub fn main() !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = general_purpose_allocator.deinit();
@@ -69,8 +77,11 @@ pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
         return error.MissingEnvVar;
     }
 
+    previous_server_was_shutdown = true;
     notifyServer(gpa, port, args) catch |err| switch (err) {
-        error.ConnectionRefused => {},
+        error.ConnectionRefused => {
+            previous_server_was_shutdown = false;
+        },
         else => return err,
     };
 
@@ -144,6 +155,26 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     defer tcp_server.deinit();
 
     log.warn("\x1b[2K\rServing website at http://{any}/\n", .{tcp_server.listen_address.in});
+
+    if (!previous_server_was_shutdown) {
+        if (std.process.getEnvVarOwned(gpa, "OPEN_BROWSER") catch null) |open_browser| {
+            defer gpa.free(open_browser);
+            if (open_browser.len == 1 and open_browser[0] == '1') {
+                const url_str = try std.fmt.allocPrint(
+                    gpa,
+                    "http://{any}",
+                    .{tcp_server.listen_address.in},
+                );
+                defer gpa.free(url_str);
+                const res = try std.process.Child.run(.{
+                    .allocator = gpa,
+                    .argv = &.{ open_command, url_str },
+                });
+                gpa.free(res.stderr);
+                gpa.free(res.stdout);
+            }
+        }
+    }
 
     const maybe_ppid: ?std.posix.pid_t = blk: {
         const ppid = std.process.getEnvVarOwned(gpa, "PPID") catch break :blk null;

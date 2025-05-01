@@ -74,6 +74,7 @@ fn handleApi(req: *Request) !bool {
             switch (msg.value.action) {
                 .shutdown => {
                     log.info("api: {s}", .{message_str});
+                    try req.http.respond("ok", .{});
                     std.process.exit(0);
                 },
                 .client_reload_check => {

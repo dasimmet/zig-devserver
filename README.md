@@ -5,7 +5,7 @@ a webserver that reloads the page when `zig build --watch` rebuilds your content
 try it with:
 
 ```
-zig build --watch watch
+zig build --watch watch -Dopen-browser
 ```
 
 and then edit `src/index.html`.
@@ -31,11 +31,12 @@ const devserver = @import("devserver");
 // in the build() function:
 
 const run_devserver = devserver.serveDir(b, .{
+    // provide a port to listen on
     .port = b.option(u16, "port", "dev server port") orelse 8080,
-
+    .open_browser = b.option(bool, "open-browser", "open the os default webbbrowser") orelse false,
     // this can accept a `LazyPath`
     // or a path in `zig-out`
-    .directory = .{ .install = "www" }, 
+    .directory = .{ .install = "www" },
 });
 b.step("dev", "run dev webserver").dependOn(&run_devserver.step);
 ```

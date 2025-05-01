@@ -8,6 +8,8 @@ const LazyPath = std.Build.LazyPath;
 
 pub const ServerOptions = struct {
     port: u16 = 0,
+    // open the os default webbrowser on first launch,
+    open_browser: bool = false,
     // should the server fork and reload itself.
     // true by default if `--watch` is in zig build's `argv`
     watch: ?bool = null,
@@ -55,6 +57,7 @@ pub fn build(b: *std.Build) void {
 
     const watch = serveDirInternal(b, exe, .{
         .port = b.option(u16, "port", "port to listen on") orelse 8080,
+        .open_browser = b.option(bool, "open-browser", "open the browser when server starts") orelse false,
         .directory = .{ .install = "www" },
     });
 
@@ -93,6 +96,7 @@ pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Ru
         },
         .lazypath => |lp| run.addFileArg(lp),
     }
+    if (opt.open_browser) run.setEnvironmentVariable("OPEN_BROWSER", "1");
     return run;
 }
 
