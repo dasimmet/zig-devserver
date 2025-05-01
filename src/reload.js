@@ -2,6 +2,7 @@
 window.addEventListener("load", () => {
     console.log("start reload.js");
     window.__zig_devserver_reload_running = false;
+    window.__zig_devserver_reload_time = 0;
     window.setInterval(async () => {
         if (window.__zig_devserver_reload_running) return;
         window.__zig_devserver_reload_running = true;
@@ -9,26 +10,24 @@ window.addEventListener("load", () => {
             const res = await fetch("/__zig_devserver_api", {
                 body: JSON.stringify({
                     action: "client_reload_check",
+                    start_time: window.__zig_devserver_reload_time,
                 }),
                 cache: 'no-store',
                 method: 'POST',
             });
-            const txt = await res.text();
+            const ress = await res.json();
             window.__zig_devserver_reload_running = false;
-            if (txt !== 'no') {
-                console.error("expected no:", txt);
-                window.setTimeout(() => {
-                    console.log("reload now");
-                    // window.location.reload();
-                }, 500);
+            if (window.__zig_devserver_reload_time === 0) {
+                window.__zig_devserver_reload_time = ress.start_time;
+            } else if (window.__zig_devserver_reload_time === ress.start_time) {
+                return;
+            } else {
+                console.error("reload:", window.__zig_devserver_reload_time, ress.start_time);
+                window.location.reload();
             }
         } catch (err) {
             console.error(err);
             window.__zig_devserver_reload_running = false;
-            window.setTimeout(() => {
-                console.log("reload now");
-                // window.location.reload();
-            }, 500);
         }
     }, 500);
 });

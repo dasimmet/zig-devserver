@@ -7,6 +7,7 @@ pub const std_options: std.Options = .{
     .log_level = .info,
 };
 const log = std.log;
+var start_timestamp: usize = 0;
 
 pub fn main() !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
@@ -96,7 +97,9 @@ pub fn notifyServer(gpa: std.mem.Allocator, port: u16, args: []const [:0]const u
     const msg: Api = .{ .action = .shutdown };
     var buf: [4096]u8 = undefined;
     const payload = try std.fmt.bufPrint(&buf, "{}\n", .{
-        std.json.fmt(msg, .{}),
+        std.json.fmt(msg, .{
+            .emit_null_optional_fields = false,
+        }),
     });
 
     var uri = try std.Uri.parse("http://127.0.0.1" ++ Api.endpoint);
@@ -128,6 +131,7 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     var root_dir: std.fs.Dir = try std.fs.cwd().openDir(root_dir_path, .{});
     defer root_dir.close();
 
+    start_timestamp = @intCast(std.time.timestamp());
     var request_pool: std.Thread.Pool = undefined;
     try request_pool.init(.{
         .allocator = gpa,
@@ -137,7 +141,7 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     const address = try std.net.Address.parseIp("127.0.0.1", port);
     var tcp_server = try address.listen(.{
         .reuse_address = true,
-    }); // wtf
+    });
     defer tcp_server.deinit();
 
     log.warn("\x1b[2K\rServing website at http://{any}/\n", .{tcp_server.listen_address.in});
@@ -251,8 +255,18 @@ const Request = struct {
                 switch (msg.value.action) {
                     .shutdown => std.process.exit(0),
                     .client_reload_check => {
-                        std.time.sleep(10 * std.time.ns_per_s);
-                        try req.http.respond("no", .{});
+                        if (msg.value.start_time) |start_time| {
+                            if (start_time == start_timestamp) {
+                                std.time.sleep(10 * std.time.ns_per_s);
+                            }
+                        } else {
+                            std.time.sleep(10 * std.time.ns_per_s);
+                        }
+                        var res_buf: [64]u8 = undefined;
+                        const res = try std.fmt.bufPrint(&res_buf, "{}", .{std.json.fmt(.{
+                            .start_time = start_timestamp,
+                        }, .{})});
+                        try req.http.respond(res, .{});
                         return true;
                     },
                     // else => return error.MessageNotImplemented,
