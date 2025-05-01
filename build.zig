@@ -12,7 +12,9 @@ pub const ServerOptions = struct {
     // true by default if `--watch` is in zig build's `argv`
     watch: ?bool = null,
     directory: union(enum) {
+        // a subpath in `zig-out`
         install: []const u8,
+        // a generated directory in the cache or the sources
         lazypath: LazyPath,
     },
 };
