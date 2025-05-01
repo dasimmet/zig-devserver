@@ -110,17 +110,20 @@ fn handleFile(req: *Request) !void {
         return error.BadPath;
     }
 
+    var is_dir_index = false;
     if (std.mem.endsWith(u8, path, "/")) {
         path = try std.fmt.allocPrint(req.allocator, "{s}{s}", .{
             path,
             "index.html",
         });
+        is_dir_index = true;
     }
 
     if (path.len < 1 or path[0] != '/') {
         req.serveError("bad request path.", .bad_request);
         return error.BadPath;
     }
+    log.info("req: {s}", .{path});
 
     if (std.mem.eql(u8, path, Api.js_endpoint)) {
         const reload_js = @embedFile("__zig_devserver_api.js");
@@ -130,7 +133,6 @@ fn handleFile(req: *Request) !void {
             } ++ common_headers),
         });
     }
-
     path = path[1 .. std.mem.indexOfScalar(u8, path, '?') orelse path.len];
 
     const mime_type = mime.extension_map.get(std.fs.path.extension(path)) orelse
@@ -138,11 +140,21 @@ fn handleFile(req: *Request) !void {
 
     const file = req.public_dir.openFile(path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
-            req.serveError(null, .not_found);
-            if (std.mem.eql(u8, path, "favicon.ico")) {
-                return; // Surpress error logging.
+            if (is_dir_index) {
+                return req.handleDir(std.fs.path.dirname(path) orelse ".");
             }
+            if (std.mem.eql(u8, path, "favicon.ico")) {
+                return req.http.respond(@embedFile("favicon.ico"), .{
+                    .extra_headers = &([_]std.http.Header{
+                        .{ .name = "content-type", .value = "image/x-icon" },
+                    } ++ common_headers),
+                });
+            }
+            req.serveError(null, .not_found);
             return err;
+        },
+        error.IsDir => {
+            return req.handleDir(path);
         },
         else => {
             req.serveError("accessing resource", .internal_server_error);
@@ -214,6 +226,52 @@ fn handleFile(req: *Request) !void {
         },
     });
     try response.writer().writeFile(file);
+    return response.end();
+}
+
+fn handleDir(req: *Request, path: []const u8) !void {
+    log.info("dir: {s}", .{path});
+    const dir = req.public_dir.openDir(path, .{
+        .iterate = true,
+    }) catch |err| switch (err) {
+        error.FileNotFound => {
+            req.serveError(null, .not_found);
+            return err;
+        },
+        else => return err,
+    };
+
+    var iter = dir.iterate();
+
+    var response = req.http.respondStreaming(.{
+        .send_buffer = try req.allocator.alloc(u8, 4000),
+        // .content_length = metadata.size(),
+        .respond_options = .{
+            .extra_headers = &([_]std.http.Header{
+                .{ .name = "content-type", .value = "text/html" },
+            } ++ common_headers),
+        },
+    });
+    const style =
+        \\:root {
+        \\  color-scheme: light dark;
+        \\}
+    ;
+    try response.writeAll("<html><head><style>\n");
+    try response.writeAll(style);
+    try response.writeAll("\n</style></head><body><ul>\n");
+    try response.writeAll("<a href=\".\"><li>.</li></a>");
+    try response.writeAll("<a href=\"..\"><li>..</li></a>");
+    while (try iter.next()) |entry| {
+        try response.writeAll("<a href=\"");
+        try response.writeAll(entry.name);
+        try response.writeAll("\"><li>");
+        try response.writeAll(entry.name);
+        try response.writeAll(" - ");
+        try response.writeAll(@tagName(entry.kind));
+        try response.writeAll("</li></a>\n");
+    }
+    try response.writeAll("</ul></body></html>\n");
     return response.end();
 }
 
