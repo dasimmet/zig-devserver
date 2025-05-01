@@ -78,13 +78,12 @@ fn handleApi(req: *Request) !bool {
                     std.process.exit(0);
                 },
                 .client_reload_check => {
-                    const sleep_time = 10 * std.time.ns_per_s;
                     if (msg.value.start_time) |start_time| {
                         if (start_time == req.start_time) {
-                            std.Thread.sleep(sleep_time);
+                            std.Thread.sleep(Api.sleep_time);
                         }
                     } else {
-                        std.Thread.sleep(sleep_time);
+                        std.Thread.sleep(Api.sleep_time);
                     }
                     var res_buf: [64]u8 = undefined;
                     const res = try std.fmt.bufPrint(&res_buf, "{}", .{std.json.fmt(.{
