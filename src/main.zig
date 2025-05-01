@@ -1,6 +1,7 @@
 const std = @import("std");
 const mime = @import("mime");
 const builtin = @import("builtin");
+const Message = @import("Message.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -49,6 +50,7 @@ pub fn usage(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
         \\
         \\subcommand usage:
         \\  serve {port} {directory}
+        \\  watch {port} {directory}
         \\  notify
         \\  help
         \\
@@ -56,7 +58,6 @@ pub fn usage(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
 }
 
 pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
-    _ = gpa;
     if (args.len != 2) {
         return error.IncorrectNumberOfArguments;
     }
@@ -64,6 +65,11 @@ pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     if (port == 0) {
         log.err("port 0 is not supported with 'watch'", .{});
     }
+
+    notifyServer(gpa, port, args) catch |err| switch (err) {
+        error.ConnectionRefused => {},
+        else => return err,
+    };
 
     const forkpid = try std.posix.fork();
 
@@ -80,6 +86,36 @@ pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     log.info("\n\nfork running: {d}\n\n", .{pid});
 
     return startServer(smp, args);
+}
+
+pub fn notifyServer(gpa: std.mem.Allocator, port: u16, args: []const [:0]const u8) !void {
+    _ = args;
+    var client = std.http.Client{
+        .allocator = gpa,
+    };
+    defer client.deinit();
+    const msg: Message = .{ .action = .shutdown };
+    var buf: [4096]u8 = undefined;
+    const payload = try std.fmt.bufPrint(&buf, "{}\n", .{
+        std.json.fmt(msg, .{}),
+    });
+
+    var uri = try std.Uri.parse("http://127.0.0.1" ++ Message.endpoint);
+    uri.port = port;
+
+    var req = try client.open(.POST, uri, .{ .server_header_buffer = &buf });
+    defer req.deinit();
+
+    req.transfer_encoding = .{ .content_length = payload.len };
+    try req.send();
+    var wtr = req.writer();
+    try wtr.writeAll(payload);
+    try req.finish();
+    req.wait() catch |err| switch (err) {
+        error.EndOfStream => {},
+        else => return err,
+    };
+    std.time.sleep(std.time.ns_per_s);
 }
 
 pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
@@ -101,9 +137,8 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     const address = try std.net.Address.parseIp("127.0.0.1", port);
     var tcp_server = try address.listen(.{
-        .reuse_port = true,
         .reuse_address = true,
-    });
+    }); // wtf
     defer tcp_server.deinit();
 
     log.warn("\x1b[2K\rServing website at http://{any}/\n", .{tcp_server.listen_address.in});
@@ -183,6 +218,10 @@ const Request = struct {
             }
             return;
         };
+        req.handleMessage() catch |err| {
+            log.warn("Error {s} responding to request from {any} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
+        };
+
         req.handleFile() catch |err| {
             log.warn("Error {s} responding to request from {any} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
         };
@@ -192,6 +231,28 @@ const Request = struct {
         .{ .name = "connection", .value = "close" },
         .{ .name = "Cache-Control", .value = "no-cache, no-store, must-revalidate" },
     };
+
+    fn handleMessage(req: *Request) !void {
+        const path = req.http.head.target;
+        log.debug("path: {s}", .{path});
+        if (std.mem.eql(u8, path, Message.endpoint)) {
+            if (req.http.head.method == .POST) {
+                var buf: [4096]u8 = undefined;
+                const reader = try req.http.reader();
+                const message_size = try reader.read(&buf);
+                const msg = try std.json.parseFromSlice(
+                    Message,
+                    req.allocator,
+                    buf[0..message_size],
+                    .{},
+                );
+                switch (msg.value.action) {
+                    .shutdown => std.process.exit(0),
+                    else => return error.MessageNotImplemented,
+                }
+            }
+        }
+    }
 
     fn handleFile(req: *Request) !void {
         var path = req.http.head.target;

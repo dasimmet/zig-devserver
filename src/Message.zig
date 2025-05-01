@@ -1,4 +1,3 @@
-port: u16,
 action: union(enum) {
     start: serve,
     shutdown,
@@ -8,3 +7,5 @@ action: union(enum) {
 pub const serve = struct {
     directory: []const u8,
 };
+
+pub const endpoint = "/__zig_devserver_api";
