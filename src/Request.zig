@@ -65,7 +65,6 @@ fn handleApi(req: *Request) !bool {
             const reader = try req.http.reader();
             const message_size = try reader.readAll(&buf);
             const message_str = buf[0..message_size];
-            log.info("api: {s}", .{message_str});
             const msg = try std.json.parseFromSlice(
                 Api,
                 req.allocator,
@@ -73,14 +72,18 @@ fn handleApi(req: *Request) !bool {
                 .{},
             );
             switch (msg.value.action) {
-                .shutdown => std.process.exit(0),
+                .shutdown => {
+                    log.info("api: {s}", .{message_str});
+                    std.process.exit(0);
+                },
                 .client_reload_check => {
+                    const sleep_time = 10 * std.time.ns_per_s;
                     if (msg.value.start_time) |start_time| {
                         if (start_time == req.start_time) {
-                            std.time.sleep(10 * std.time.ns_per_s);
+                            std.Thread.sleep(sleep_time);
                         }
                     } else {
-                        std.time.sleep(10 * std.time.ns_per_s);
+                        std.Thread.sleep(sleep_time);
                     }
                     var res_buf: [64]u8 = undefined;
                     const res = try std.fmt.bufPrint(&res_buf, "{}", .{std.json.fmt(.{

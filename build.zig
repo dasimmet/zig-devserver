@@ -69,7 +69,7 @@ pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Ru
         run.setEnvironmentVariable("PPID", ppid);
     }
     var watch = opt.watch orelse false;
-    if (opt.watch != null and opt.watch.?) {
+    if (opt.watch == null) {
         // TODO: find a better way to determine we are watching
         const args = std.process.argsAlloc(b.allocator) catch unreachable;
         defer std.process.argsFree(b.allocator, args);

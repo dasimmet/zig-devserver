@@ -64,6 +64,10 @@ pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     if (port == 0) {
         log.err("port 0 is not supported with 'watch'", .{});
     }
+    if (!try std.process.hasEnvVar(gpa, "PPID")) {
+        std.log.err("env var PPID not found. watch will fork and never stop otherwise.", .{});
+        return error.MissingEnvVar;
+    }
 
     notifyServer(gpa, port, args) catch |err| switch (err) {
         error.ConnectionRefused => {},
@@ -79,11 +83,7 @@ pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
         std.process.exit(0);
     }
 
-    const pid = std.os.linux.getpid();
     const smp = std.heap.smp_allocator;
-
-    log.info("\n\nfork running: {d}\n\n", .{pid});
-
     return startServer(smp, args);
 }
 
