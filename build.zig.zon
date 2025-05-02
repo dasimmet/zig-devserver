@@ -1,7 +1,7 @@
 .{
     .name = .devserver,
     .fingerprint = 0x1b9afb9db89b6f99,
-    .version = "0.0.0",
+    .version = "0.0.1",
     .minimum_zig_version = "0.14.0",
     .dependencies = .{
         .mime = .{
@@ -11,7 +11,6 @@
     },
     .paths = .{
         "src",
-        "build",
         "build.zig",
         "build.zig.zon",
         "LICENSE",
