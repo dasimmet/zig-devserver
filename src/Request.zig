@@ -125,7 +125,7 @@ fn handleFile(req: *Request) !void {
     }
 
     if (std.mem.eql(u8, path, Api.js_endpoint)) {
-        const reload_js = @embedFile("static/__zig_devserver_api.js");
+        const reload_js = Api.embedded.js;
         log.debug("{d}: {s} - {s}", .{ std.time.timestamp(), path, "application/javascript" });
         return req.http.respond(reload_js, .{
             .extra_headers = &([_]std.http.Header{
@@ -145,7 +145,7 @@ fn handleFile(req: *Request) !void {
             }
             if (std.mem.eql(u8, path, "favicon.ico")) {
                 log.info("{d}: {s} - {s}", .{ std.time.timestamp(), path, "image/x-icon" });
-                return req.http.respond(@embedFile("static/favicon.ico"), .{
+                return req.http.respond(Api.embedded.favicon, .{
                     .extra_headers = &([_]std.http.Header{
                         .{ .name = "content-type", .value = "image/x-icon" },
                     } ++ common_headers),
@@ -258,7 +258,9 @@ fn handleDir(req: *Request, path: []const u8) !void {
         \\  color-scheme: light dark;
         \\}
     ;
-    try response.writeAll("<html><head><style>\n");
+    try response.writeAll("<html><head><script src=\"");
+    try response.writeAll(Api.js_endpoint);
+    try response.writeAll("\"></script><style>\n");
     try response.writeAll(style);
     try response.writeAll("\n</style></head><body><ul>\n");
     try response.writeAll("<a href=\".\"><li>.</li></a>");
