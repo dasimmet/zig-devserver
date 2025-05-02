@@ -123,10 +123,10 @@ fn handleFile(req: *Request) !void {
         req.serveError("bad request path.", .bad_request);
         return error.BadPath;
     }
-    log.info("req: {s}", .{path});
 
     if (std.mem.eql(u8, path, Api.js_endpoint)) {
         const reload_js = @embedFile("__zig_devserver_api.js");
+        log.debug("{d}: {s} - {s}", .{ std.time.timestamp(), path, "application/javascript" });
         return req.http.respond(reload_js, .{
             .extra_headers = &([_]std.http.Header{
                 .{ .name = "content-type", .value = "application/javascript" },
@@ -144,6 +144,7 @@ fn handleFile(req: *Request) !void {
                 return req.handleDir(std.fs.path.dirname(path) orelse ".");
             }
             if (std.mem.eql(u8, path, "favicon.ico")) {
+                log.info("{d}: {s} - {s}", .{ std.time.timestamp(), path, "image/x-icon" });
                 return req.http.respond(@embedFile("favicon.ico"), .{
                     .extra_headers = &([_]std.http.Header{
                         .{ .name = "content-type", .value = "image/x-icon" },
@@ -191,6 +192,8 @@ fn handleFile(req: *Request) !void {
             break :blk @tagName(mt);
         },
     };
+    log.info("{d}: {s} - {s}", .{ std.time.timestamp(), path, content_type });
+
     if (mime_type == .@"text/html") {
         const content = try file.readToEndAlloc(req.allocator, std.math.maxInt(u32));
         defer req.allocator.free(content);
@@ -218,7 +221,6 @@ fn handleFile(req: *Request) !void {
 
     var response = req.http.respondStreaming(.{
         .send_buffer = try req.allocator.alloc(u8, 4000),
-        // .content_length = metadata.size(),
         .respond_options = .{
             .extra_headers = &([_]std.http.Header{
                 .{ .name = "content-type", .value = content_type },
@@ -230,7 +232,8 @@ fn handleFile(req: *Request) !void {
 }
 
 fn handleDir(req: *Request, path: []const u8) !void {
-    log.info("dir: {s}", .{path});
+    log.info("{d}: {s}", .{ std.time.timestamp(), path });
+
     const dir = req.public_dir.openDir(path, .{
         .iterate = true,
     }) catch |err| switch (err) {
@@ -245,7 +248,6 @@ fn handleDir(req: *Request, path: []const u8) !void {
 
     var response = req.http.respondStreaming(.{
         .send_buffer = try req.allocator.alloc(u8, 4000),
-        // .content_length = metadata.size(),
         .respond_options = .{
             .extra_headers = &([_]std.http.Header{
                 .{ .name = "content-type", .value = "text/html" },
