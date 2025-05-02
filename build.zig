@@ -65,7 +65,7 @@ pub fn build(b: *std.Build) void {
     }
     b.step("run-with-args", "run the server binary with arguments").dependOn(&run.step);
 
-    const install_html = b.addInstallFile(b.path("src/index.html"), "www/index.html");
+    const install_html = b.addInstallFile(b.path("src/static/devserver-index.html"), "www/index.html");
     b.getInstallStep().dependOn(&install_html.step);
 
     const port = b.option(u16, "port", "port to listen on") orelse 8080;
@@ -87,6 +87,17 @@ pub fn build(b: *std.Build) void {
         });
 
         b.step("run-lazypath-src", "run the server on a lazypath in src").dependOn(&watch.step);
+    }
+    {
+        const wf = b.addWriteFiles();
+        _ = wf.add("test.txt", "\nAll your codebase are belong to us!\n");
+        const watch = serveDirInternal(b, exe, .{
+            .port = port,
+            .open_browser = open_browser,
+            .directory = .serveLazyPath(wf.getDirectory()),
+        });
+
+        b.step("run-lazypath-wf", "run the server on a writefiles' lazypath").dependOn(&watch.step);
     }
 }
 

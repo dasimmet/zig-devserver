@@ -125,7 +125,7 @@ fn handleFile(req: *Request) !void {
     }
 
     if (std.mem.eql(u8, path, Api.js_endpoint)) {
-        const reload_js = @embedFile("__zig_devserver_api.js");
+        const reload_js = @embedFile("static/__zig_devserver_api.js");
         log.debug("{d}: {s} - {s}", .{ std.time.timestamp(), path, "application/javascript" });
         return req.http.respond(reload_js, .{
             .extra_headers = &([_]std.http.Header{
@@ -145,7 +145,7 @@ fn handleFile(req: *Request) !void {
             }
             if (std.mem.eql(u8, path, "favicon.ico")) {
                 log.info("{d}: {s} - {s}", .{ std.time.timestamp(), path, "image/x-icon" });
-                return req.http.respond(@embedFile("favicon.ico"), .{
+                return req.http.respond(@embedFile("static/favicon.ico"), .{
                     .extra_headers = &([_]std.http.Header{
                         .{ .name = "content-type", .value = "image/x-icon" },
                     } ++ common_headers),
@@ -200,7 +200,6 @@ fn handleFile(req: *Request) !void {
 
         var response = req.http.respondStreaming(.{
             .send_buffer = try req.allocator.alloc(u8, content.len + Api.injected_js.len),
-            // .content_length = metadata.size(),
             .respond_options = .{
                 .extra_headers = &([_]std.http.Header{
                     .{ .name = "content-type", .value = content_type },
@@ -250,7 +249,7 @@ fn handleDir(req: *Request, path: []const u8) !void {
         .send_buffer = try req.allocator.alloc(u8, 4000),
         .respond_options = .{
             .extra_headers = &([_]std.http.Header{
-                .{ .name = "content-type", .value = "text/html" },
+                .{ .name = "content-type", .value = "text/html; charset=utf-8" },
             } ++ common_headers),
         },
     });
@@ -267,10 +266,19 @@ fn handleDir(req: *Request, path: []const u8) !void {
         try response.writeAll("<a href=\"..\"><li>..</li></a>");
     }
     while (try iter.next()) |entry| {
+        switch (entry.kind) {
+            .directory, .file, .sym_link => {},
+            else => continue,
+        }
         try response.writeAll("<a href=\"");
         try response.writeAll(entry.name);
         try response.writeAll("\"><li>");
-        try response.writeAll(@tagName(entry.kind));
+        try response.writeAll(switch (entry.kind) {
+            .directory => "📁",
+            .file => "🗎",
+            .sym_link => "🔗",
+            else => unreachable,
+        });
         try response.writeAll(" - ");
         try response.writeAll(entry.name);
         try response.writeAll("</li></a>\n");
