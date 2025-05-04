@@ -1,11 +1,11 @@
 # Zig Dev Http Webserver
 
-a webserver that reloads the page when `zig build --watch` rebuilds your content
+a webserver that reloads the page when `zig build dev --watch` rebuilds your content
 
 try it with:
 
 ```
-zig build run --watch -Dopen-browser=index.html
+zig build dev --watch -Dopen-browser=index.html
 ```
 
 and then edit `src/index.html` and have the browser tab reload.
@@ -18,7 +18,7 @@ The next launch of the server will send a request to the old instance to kill it
 On html pages a small javascript is injected to check when the server was started.
 When the page receives a newer timestamp, a reload is triggered.
 
-To stop the forked server when `zig build --watch` is stopped,
+To stop the forked server when `zig build dev --watch` is stopped,
 it sends `kill(ppid, 0)` signals back to it's parent process on request and end itself if needed.
 
 Naturally, DO NOT USE THIS IN PRODUCTION. This is a development tool only.
@@ -49,6 +49,8 @@ pub fn build(b: *std.Build) void {
         // alternatively, use `serveLazyPath` on sources or generated files
         .directory = .serveInstall("www"),
     });
+
+    // setup a `dev` top level step to run the server
     b.step("dev", "run dev webserver").dependOn(&run_devserver.step);
 }
 ```

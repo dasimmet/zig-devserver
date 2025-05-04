@@ -71,13 +71,13 @@ pub fn build(b: *std.Build) void {
     const port = b.option(u16, "port", "port to listen on") orelse 8080;
     const open_browser = b.option([]const u8, "open-browser", "open the browser when server starts");
     {
-        const watch = serveDirInternal(b, exe, .{
+        const dev = serveDirInternal(b, exe, .{
             .port = port,
             .open_browser = open_browser,
             .directory = .serveInstall("www"),
         });
 
-        b.step("run", "run the server").dependOn(&watch.step);
+        b.step("dev", "run the server").dependOn(&dev.step);
     }
     {
         const watch = serveDirInternal(b, exe, .{
@@ -113,10 +113,16 @@ pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Ru
     }
     var watch = opt.watch orelse false;
     if (opt.watch == null) {
-        // TODO: find a better way to determine we are watching
+        // TODO: find a better way to determine we are running zig build in
+        // watch mode.
+        // for now, we iterate all original arguments and check if a --watch is
+        // in there.
         const args = std.process.argsAlloc(b.allocator) catch unreachable;
         defer std.process.argsFree(b.allocator, args);
         for (args) |arg| {
+            if (std.mem.eql(u8, arg, "--")) {
+                break;
+            }
             if (std.mem.eql(u8, arg, "--watch")) {
                 watch = true;
                 break;
