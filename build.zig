@@ -80,6 +80,20 @@ pub fn build(b: *std.Build) void {
         b.step("dev", "run the server").dependOn(&dev.step);
     }
     {
+        const serve_dir = b.option(
+            LazyPath,
+            "serve-dir",
+            "path to directory for 'run-lazypath-option'",
+        ) orelse b.path("");
+        const watch = serveDirInternal(b, exe, .{
+            .port = port,
+            .open_browser = open_browser,
+            .directory = .serveLazyPath(serve_dir),
+        });
+
+        b.step("run-lazypath-option", "run the server on a lazypath in src").dependOn(&watch.step);
+    }
+    {
         const watch = serveDirInternal(b, exe, .{
             .port = port,
             .open_browser = open_browser,

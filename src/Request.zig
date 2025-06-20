@@ -262,7 +262,14 @@ fn handleDir(req: *Request, path: []const u8) !void {
     try response.writeAll(Api.js_endpoint);
     try response.writeAll("\"></script><style>\n");
     try response.writeAll(style);
-    try response.writeAll("\n</style></head><body><ul>\n");
+    try response.writeAll("\n</style></head><body>\n");
+    try response.writeAll("<h2>Directory Listing - ");
+    if (std.mem.eql(u8, ".", path)) {
+        try response.writeAll("/");
+    } else {
+        try response.writeAll(path);
+    }
+    try response.writeAll("</h2>\n<ul>\n");
     try response.writeAll("<a href=\".\"><li>.</li></a>");
     if (!std.mem.eql(u8, path, ".")) {
         try response.writeAll("<a href=\"..\"><li>..</li></a>");
@@ -281,7 +288,7 @@ fn handleDir(req: *Request, path: []const u8) !void {
             .sym_link => "🔗",
             else => unreachable,
         });
-        try response.writeAll(" - ");
+        try response.writeAll(" ");
         try response.writeAll(entry.name);
         try response.writeAll("</li></a>\n");
     }
