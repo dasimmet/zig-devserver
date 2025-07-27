@@ -161,9 +161,11 @@ pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Ru
 fn compileServer(b: *std.Build, target: ResolvedTarget, optimize: OptimizeMode) *Compile {
     const exe = b.addExecutable(.{
         .name = "devserver",
-        .target = target,
-        .optimize = optimize,
-        .root_source_file = b.path("src/main.zig"),
+        .root_module = b.addModule("devserver", .{
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = b.path("src/main.zig"),
+        }),
     });
     switch (target.result.os.tag) {
         .windows => exe.linkLibC(),
