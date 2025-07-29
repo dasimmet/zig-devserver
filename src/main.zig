@@ -132,7 +132,7 @@ pub fn notifyServer(gpa: std.mem.Allocator, host: []const u8, port: u16) !void {
         error.EndOfStream => {},
         else => return err,
     };
-    std.time.sleep(std.time.ns_per_s);
+    std.Thread.sleep(std.time.ns_per_s);
 }
 
 pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
