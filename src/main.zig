@@ -17,7 +17,9 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(gpa);
     defer std.process.argsFree(gpa, args);
 
-    log.info("server args: {s}", .{args});
+    log.info("server args: {f}", .{
+        std.json.fmt(args, .{}),
+    });
 
     if (args.len < 2) {
         try usage(gpa, args);
@@ -46,8 +48,11 @@ pub fn main() !void {
 
 pub fn usage(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     _ = gpa;
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("args: {s}\n", .{args});
+    var outbuf: [64]u8 = undefined;
+    var stdout = std.fs.File.stdout().writer(&outbuf).interface;
+    try stdout.print("args: {f}\n", .{
+        std.json.fmt(args, .{}),
+    });
     try stdout.writeAll(
         \\usage: devserver {-h|--help|-?|help|serve|notify} [subcommand args]
         \\
@@ -105,7 +110,7 @@ pub fn notifyServer(gpa: std.mem.Allocator, host: []const u8, port: u16) !void {
     defer client.deinit();
     const msg: Request.Api = .{ .action = .shutdown };
     var buf: [4096]u8 = undefined;
-    const payload = try std.fmt.bufPrint(&buf, "{}\n", .{
+    const payload = try std.fmt.bufPrint(&buf, "{f}\n", .{
         std.json.fmt(msg, .{
             .emit_null_optional_fields = false,
         }),
@@ -160,7 +165,7 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     });
     defer tcp_server.deinit();
 
-    log.warn("\x1b[2K\rServing website at http://{any}/\n", .{tcp_server.listen_address.in});
+    log.warn("\x1b[2K\rServing website at http://{f}/\n", .{tcp_server.listen_address.in});
 
     if (!previous_server_was_shutdown) {
         if (std.process.getEnvVarOwned(gpa, "ZIG_DEVSERVER_OPEN_BROWSER") catch null) |open_browser| {

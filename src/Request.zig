@@ -86,9 +86,9 @@ fn handleApi(req: *Request) !bool {
                         std.Thread.sleep(Api.sleep_time);
                     }
                     var res_buf: [64]u8 = undefined;
-                    const res = try std.fmt.bufPrint(&res_buf, "{}", .{std.json.fmt(.{
-                        .start_time = req.start_time,
-                    }, .{})});
+                    const res = try std.fmt.bufPrint(&res_buf, "{f}", .{
+                        std.json.fmt(.{ .start_time = req.start_time }, .{}),
+                    });
                     try req.http.respond(res, .{});
                     return true;
                 },
@@ -164,11 +164,12 @@ fn handleFile(req: *Request) !void {
     };
     defer file.close();
 
-    const metadata = file.metadata() catch |err| {
+    const stat: std.fs.File.Stat = file.stat() catch |err| {
         req.serveError("accessing resource", .internal_server_error);
         return err;
     };
-    if (metadata.kind() == .directory) {
+
+    if (stat.kind == .directory) {
         const location = try std.fmt.allocPrint(
             req.allocator,
             "{s}/",
