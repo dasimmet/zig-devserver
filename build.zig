@@ -91,7 +91,7 @@ pub fn build(b: *std.Build) void {
             .directory = .serveLazyPath(serve_dir),
         });
 
-        b.step("run-lazypath-option", "run the server on a lazypath in src").dependOn(&watch.step);
+        b.step("run-lazypath-option", "run the server on a lazypath provided by the '-Dserve-dir=' option").dependOn(&watch.step);
     }
     {
         const watch = serveDirInternal(b, exe, .{
