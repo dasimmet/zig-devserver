@@ -47,6 +47,22 @@ pub fn handle(req: *Request) void {
         }
         return;
     };
+
+    switch (req.http.upgradeRequested()) {
+        .none => {},
+        .other => |upgrade| {
+            std.log.err("Unknown Upgrade request: {s}", .{upgrade});
+        },
+        .websocket => |upgrade| {
+            if (upgrade) |ws| {
+                std.log.warn("Websocket is not yet handled: {s}", .{ws});
+            } else {
+                std.log.warn("Websocket is not yet handled", .{});
+            }
+            return;
+        },
+    }
+
     const api = req.handleApi() catch |err| {
         log.warn("Error {s} responding to request from {any} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
         return;
