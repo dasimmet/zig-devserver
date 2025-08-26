@@ -59,7 +59,7 @@ pub fn handle(req: *Request) void {
                     return log.err("failed to respond web socket: {t}", .{connection_writer.err.?});
                 };
                 return req.handleWebsocket(&web_socket) catch |err| {
-                    return log.err("failed to respond web socket: {}", .{err});
+                    return log.err("failed to handle web socket: {}", .{err});
                 };
             } else {
                 std.log.warn("Websocket connection without id!", .{});
@@ -87,24 +87,28 @@ const common_headers = [_]std.http.Header{
 fn handleWebsocket(req: *Request, sock: *std.http.Server.WebSocket) !void {
     const recv_thread = try std.Thread.spawn(.{}, recvWebSocketMessages, .{ req, sock });
     defer recv_thread.join();
-    {
+    while (true) {
         var res_buf: [64]u8 = undefined;
-
         var bufs: [1][]const u8 = .{
             try std.fmt.bufPrint(&res_buf, "{f}", .{
                 std.json.fmt(.{ .start_time = req.start_time }, .{}),
             }),
         };
         try sock.writeMessageVec(&bufs, .text);
-    }
-    while (true) {
-        std.Thread.sleep(1_000_000_000_000);
+        std.Thread.sleep(5 * std.time.ns_per_s);
     }
 }
 
-fn recvWebSocketMessages(req: *Request, sock: *std.http.Server.WebSocket) !void {
+fn recvWebSocketMessages(req: *Request, sock: *std.http.Server.WebSocket) void {
     _ = req;
-    _ = sock;
+    while (true) {
+        const msg = sock.readSmallMessage() catch {
+            std.log.err("client disconnect: {s}", .{sock.key});
+            return;
+        };
+        if (msg.data.len == 0) continue;
+        std.log.warn("msg: {} {s}", .{ msg.opcode, msg.data });
+    }
 }
 
 fn handleApi(req: *Request) !bool {

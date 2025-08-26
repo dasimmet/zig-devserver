@@ -9,12 +9,12 @@ window.addEventListener("load", () => {
         const socket = new WebSocket(window.__zig_devserver_ws_url);
         window.__zig_devserver_socket = socket;
         socket.onopen = function (e) {
-            console.log("[open] Connection established");
-            socket.send("Hi im a client!");
+            console.log("__zig_devserver_api.js [open] Connection established");
+            socket.send("Hi im a Client!");
         };
 
         socket.onmessage = function (event) {
-            console.log(`[message] Data received from server: ${event.data}`);
+            console.log(`__zig_devserver_api.js [message] Data received from server: ${event.data}`);
             const res = JSON.parse(event.data);
             if (window.__zig_devserver_reload_time === 0) {
                 window.__zig_devserver_reload_time = res.start_time;
@@ -26,16 +26,16 @@ window.addEventListener("load", () => {
 
         socket.onclose = function (event) {
             if (event.wasClean) {
-                console.log(`[close] Connection closed cleanly, code=${event.code} reason=${event.reason}`);
+                console.log(`__zig_devserver_api.js [close] Connection closed cleanly, code=${event.code} reason=${event.reason}`);
             } else {
-                console.error('[close] Connection died');
+                console.error('__zig_devserver_api.js [close] Connection died');
             }
             window.setTimeout(connect_ws, 100);
         };
 
 
         socket.onerror = function (error) {
-            console.error('[error]', error);
+            console.error('__zig_devserver_api.js [error]', error);
         };
     };
     connect_ws();
