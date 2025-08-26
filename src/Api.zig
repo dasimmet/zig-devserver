@@ -2,7 +2,6 @@ const std = @import("std");
 
 action: enum {
     shutdown,
-    client_reload_check,
 },
 start_time: ?isize = null,
 

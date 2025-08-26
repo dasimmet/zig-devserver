@@ -1,34 +1,43 @@
 
 window.addEventListener("load", () => {
     console.log("start __zig_devserver_api.js");
-    window.__zig_devserver_reload_running = false;
+    window.__zig_devserver_ws_url = window.location.href.replace("http://", "ws://").replace("https://", "wss://");
     window.__zig_devserver_reload_time = 0;
-    window.setInterval(async () => {
-        if (window.__zig_devserver_reload_running) return;
-        window.__zig_devserver_reload_running = true;
-        try {
-            const res = await fetch("/__zig_devserver_api", {
-                body: JSON.stringify({
-                    action: "client_reload_check",
-                    start_time: window.__zig_devserver_reload_time,
-                }),
-                cache: 'no-store',
-                method: 'POST',
-            });
-            const ress = await res.json();
-            window.__zig_devserver_reload_running = false;
+    const connect_ws = async () => {
+
+        console.log("connect ws:", window.__zig_devserver_ws_url);
+        const socket = new WebSocket(window.__zig_devserver_ws_url);
+        window.__zig_devserver_socket = socket;
+        socket.onopen = function (e) {
+            console.log("[open] Connection established");
+            socket.send("Hi im a client!");
+        };
+
+        socket.onmessage = function (event) {
+            console.log(`[message] Data received from server: ${event.data}`);
+            const res = JSON.parse(event.data);
             if (window.__zig_devserver_reload_time === 0) {
-                window.__zig_devserver_reload_time = ress.start_time;
-            } else if (window.__zig_devserver_reload_time === ress.start_time) {
-                return;
-            } else {
-                console.error("reload:", window.__zig_devserver_reload_time, ress.start_time);
+                window.__zig_devserver_reload_time = res.start_time;
+            } else if (window.__zig_devserver_reload_time !== res.start_time) {
+                console.error("reload:", window.__zig_devserver_reload_time, res.start_time);
                 window.location.reload();
             }
-        } catch (err) {
-            console.error(err);
-            window.__zig_devserver_reload_running = false;
-        }
-    }, 500);
+        };
+
+        socket.onclose = function (event) {
+            if (event.wasClean) {
+                console.log(`[close] Connection closed cleanly, code=${event.code} reason=${event.reason}`);
+            } else {
+                console.error('[close] Connection died');
+            }
+            window.setTimeout(connect_ws, 100);
+        };
+
+
+        socket.onerror = function (error) {
+            console.error('[error]', error);
+        };
+    };
+    connect_ws();
 });
 

@@ -54,10 +54,15 @@ pub fn handle(req: *Request) void {
             std.log.err("Unknown Upgrade request: {s}", .{upgrade});
         },
         .websocket => |upgrade| {
-            if (upgrade) |ws| {
-                std.log.warn("Websocket is not yet handled: {s}", .{ws});
+            if (upgrade) |key| {
+                var web_socket = req.http.respondWebSocket(.{ .key = key }) catch {
+                    return log.err("failed to respond web socket: {t}", .{connection_writer.err.?});
+                };
+                return req.handleWebsocket(&web_socket) catch |err| {
+                    return log.err("failed to respond web socket: {}", .{err});
+                };
             } else {
-                std.log.warn("Websocket is not yet handled", .{});
+                std.log.warn("Websocket connection without id!", .{});
             }
             return;
         },
@@ -79,6 +84,29 @@ const common_headers = [_]std.http.Header{
     .{ .name = "Cache-Control", .value = "no-cache, no-store, must-revalidate" },
 };
 
+fn handleWebsocket(req: *Request, sock: *std.http.Server.WebSocket) !void {
+    const recv_thread = try std.Thread.spawn(.{}, recvWebSocketMessages, .{ req, sock });
+    defer recv_thread.join();
+    {
+        var res_buf: [64]u8 = undefined;
+
+        var bufs: [1][]const u8 = .{
+            try std.fmt.bufPrint(&res_buf, "{f}", .{
+                std.json.fmt(.{ .start_time = req.start_time }, .{}),
+            }),
+        };
+        try sock.writeMessageVec(&bufs, .text);
+    }
+    while (true) {
+        std.Thread.sleep(1_000_000_000_000);
+    }
+}
+
+fn recvWebSocketMessages(req: *Request, sock: *std.http.Server.WebSocket) !void {
+    _ = req;
+    _ = sock;
+}
+
 fn handleApi(req: *Request) !bool {
     const path = req.http.head.target;
     if (std.mem.eql(u8, path, Api.endpoint)) {
@@ -98,21 +126,6 @@ fn handleApi(req: *Request) !bool {
                     log.info("api: {s}", .{message_str});
                     try req.http.respond("ok", .{});
                     std.process.exit(0);
-                },
-                .client_reload_check => {
-                    if (msg.value.start_time) |start_time| {
-                        if (start_time == req.start_time) {
-                            std.Thread.sleep(Api.sleep_time);
-                        }
-                    } else {
-                        std.Thread.sleep(Api.sleep_time);
-                    }
-                    var res_buf: [64]u8 = undefined;
-                    const res = try std.fmt.bufPrint(&res_buf, "{f}", .{
-                        std.json.fmt(.{ .start_time = req.start_time }, .{}),
-                    });
-                    try req.http.respond(res, .{});
-                    return true;
                 },
                 // else => return error.MessageNotImplemented,
             }
