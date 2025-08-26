@@ -125,18 +125,11 @@ pub fn notifyServer(gpa: std.mem.Allocator, host: []const u8, port: u16) !void {
     var uri = try std.Uri.parse(api_url);
     uri.port = port;
 
-    var req = try client.open(.POST, uri, .{ .server_header_buffer = &buf });
-    defer req.deinit();
-
-    req.transfer_encoding = .{ .content_length = payload.len };
-    try req.send();
-    var wtr = req.writer();
-    try wtr.writeAll(payload);
-    try req.finish();
-    req.wait() catch |err| switch (err) {
-        error.EndOfStream => {},
-        else => return err,
-    };
+    _ = try client.fetch(.{
+        .location = .{ .uri = uri },
+        .payload = payload,
+        .method = .POST,
+    });
     std.Thread.sleep(std.time.ns_per_s);
 }
 

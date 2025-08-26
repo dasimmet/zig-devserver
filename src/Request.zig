@@ -31,7 +31,13 @@ pub fn handle(req: *Request) void {
     defer req.allocator_arena.deinit();
     req.allocator = req.allocator_arena.allocator();
 
-    var http_server = std.http.Server.init(req.conn, &req.buffer);
+    var send_buffer: [4096]u8 = undefined;
+    var recv_buffer: [4096]u8 = undefined;
+    var connection_reader = req.conn.stream.reader(&recv_buffer);
+    var connection_writer = req.conn.stream.writer(&send_buffer);
+
+    var http_server: std.http.Server = .init(connection_reader.interface(), &connection_writer.interface);
+
     req.http = http_server.receiveHead() catch |err| {
         if (err != error.HttpConnectionClosing) {
             log.err("Error with getting request headers:{s}", .{@errorName(err)});
@@ -62,9 +68,9 @@ fn handleApi(req: *Request) !bool {
     if (std.mem.eql(u8, path, Api.endpoint)) {
         if (req.http.head.method == .POST) {
             var buf: [4096]u8 = undefined;
-            const reader = try req.http.reader();
-            const message_size = try reader.readAll(&buf);
-            const message_str = buf[0..message_size];
+            const reader = try req.http.readerExpectContinue(&buf);
+            try reader.fillMore();
+            const message_str = reader.buffered();
             const msg = try std.json.parseFromSlice(
                 Api,
                 req.allocator,
@@ -199,35 +205,40 @@ fn handleFile(req: *Request) !void {
         const content = try file.readToEndAlloc(req.allocator, std.math.maxInt(u32));
         defer req.allocator.free(content);
 
-        var response = req.http.respondStreaming(.{
-            .send_buffer = try req.allocator.alloc(u8, content.len + Api.injected_js.len),
+        var response = try req.http.respondStreaming(
+            try req.allocator.alloc(u8, content.len + Api.injected_js.len),
+            .{
+                .respond_options = .{
+                    .extra_headers = &([_]std.http.Header{
+                        .{ .name = "content-type", .value = content_type },
+                    } ++ common_headers),
+                },
+            },
+        );
+        if (std.mem.indexOf(u8, content, "<head>")) |head_idx| {
+            const post_head_pos = head_idx + "<head>".len;
+            try response.writer.writeAll(content[0..post_head_pos]);
+            try response.writer.writeAll(Api.injected_js);
+            try response.writer.writeAll(content[post_head_pos..]);
+        } else {
+            log.warn("<head> not found in html: {s}\ncannot inject reload js", .{path});
+            try response.writer.writeAll(content);
+        }
+        return response.end();
+    }
+
+    var response = try req.http.respondStreaming(
+        try req.allocator.alloc(u8, 4000),
+        .{
             .respond_options = .{
                 .extra_headers = &([_]std.http.Header{
                     .{ .name = "content-type", .value = content_type },
                 } ++ common_headers),
             },
-        });
-        if (std.mem.indexOf(u8, content, "<head>")) |head_idx| {
-            const post_head_pos = head_idx + "<head>".len;
-            _ = try response.writer().write(content[0..post_head_pos]);
-            _ = try response.writer().write(Api.injected_js);
-            _ = try response.writer().write(content[post_head_pos..]);
-        } else {
-            log.warn("<head> not found in html: {s}\ncannot inject reload js", .{path});
-            _ = try response.writer().write(content);
-        }
-        return response.end();
-    }
-
-    var response = req.http.respondStreaming(.{
-        .send_buffer = try req.allocator.alloc(u8, 4000),
-        .respond_options = .{
-            .extra_headers = &([_]std.http.Header{
-                .{ .name = "content-type", .value = content_type },
-            } ++ common_headers),
         },
-    });
-    try response.writer().writeFile(file);
+    );
+    var file_reader = file.reader(&.{});
+    _ = try response.writer.sendFile(&file_reader, .unlimited);
     return response.end();
 }
 
@@ -246,14 +257,17 @@ fn handleDir(req: *Request, path: []const u8) !void {
 
     var iter = dir.iterate();
 
-    var response = req.http.respondStreaming(.{
-        .send_buffer = try req.allocator.alloc(u8, 4000),
-        .respond_options = .{
-            .extra_headers = &([_]std.http.Header{
-                .{ .name = "content-type", .value = "text/html; charset=utf-8" },
-            } ++ common_headers),
+    var res = try req.http.respondStreaming(
+        try req.allocator.alloc(u8, 4000),
+        .{
+            .respond_options = .{
+                .extra_headers = &([_]std.http.Header{
+                    .{ .name = "content-type", .value = "text/html; charset=utf-8" },
+                } ++ common_headers),
+            },
         },
-    });
+    );
+    const response = &res.writer;
     const style =
         \\:root {
         \\  color-scheme: light dark;
@@ -294,7 +308,7 @@ fn handleDir(req: *Request, path: []const u8) !void {
         try response.writeAll("</li></a>\n");
     }
     try response.writeAll("</ul></body></html>\n");
-    return response.end();
+    return res.end();
 }
 
 fn serveError(req: *Request, comptime reason: ?[]const u8, comptime status: std.http.Status) void {
