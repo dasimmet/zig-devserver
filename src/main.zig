@@ -85,7 +85,7 @@ pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     previous_server_was_shutdown = false;
     for (0..2) |_| {
         notifyServer(gpa, args[0], port) catch |err| switch (err) {
-            error.ConnectionRefused => break,
+            error.ConnectionRefused => break, // no server found.
             else => return err,
         };
         previous_server_was_shutdown = true;

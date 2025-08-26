@@ -22,6 +22,7 @@ buffer: [1024]u8,
 response_buffer: [4000]u8,
 // timestamp of the server's start
 start_time: isize,
+ws_running: bool,
 
 pub fn handle(req: *Request) void {
     defer req.gpa.destroy(req);
@@ -85,9 +86,10 @@ const common_headers = [_]std.http.Header{
 };
 
 fn handleWebsocket(req: *Request, sock: *std.http.Server.WebSocket) !void {
+    req.ws_running = true;
     const recv_thread = try std.Thread.spawn(.{}, recvWebSocketMessages, .{ req, sock });
     defer recv_thread.join();
-    while (true) {
+    while (req.ws_running) {
         var res_buf: [64]u8 = undefined;
         var bufs: [1][]const u8 = .{
             try std.fmt.bufPrint(&res_buf, "{f}", .{
@@ -100,13 +102,16 @@ fn handleWebsocket(req: *Request, sock: *std.http.Server.WebSocket) !void {
 }
 
 fn recvWebSocketMessages(req: *Request, sock: *std.http.Server.WebSocket) void {
-    _ = req;
     while (true) {
         const msg = sock.readSmallMessage() catch {
             std.log.err("client disconnect: {s}", .{sock.key});
             return;
         };
         if (msg.data.len == 0) continue;
+        if (msg.opcode == .connection_close) {
+            req.ws_running = false;
+            return;
+        }
         std.log.warn("msg: {} {s}", .{ msg.opcode, msg.data });
     }
 }
