@@ -150,6 +150,13 @@ pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Ru
     switch (opt.directory) {
         .install => |subdir| {
             run.addArg(b.pathJoin(&.{ b.install_path, subdir }));
+            const install_step = b.getInstallStep();
+            run.step.dependOn(install_step);
+            for (install_step.dependencies.items) |it| {
+                if (&run.step != it) {
+                    run.step.dependOn(it);
+                }
+            }
             run.step.dependOn(b.getInstallStep());
         },
         .lazypath => |lp| run.addFileArg(lp),

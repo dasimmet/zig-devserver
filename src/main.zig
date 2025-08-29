@@ -8,7 +8,7 @@ pub const std_options: std.Options = .{
 };
 const log = std.log;
 
-var previous_server_was_shutdown = false;
+var previous_shutdown_servers: u8 = 0;
 
 pub fn main() !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
@@ -82,13 +82,17 @@ pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
         return error.MissingEnvVar;
     }
 
-    previous_server_was_shutdown = false;
+    previous_shutdown_servers = 0;
     for (0..2) |_| {
         notifyServer(gpa, args[0], port) catch |err| switch (err) {
             error.ConnectionRefused => break, // no server found.
+            error.ConnectionResetByPeer,
+            error.ReadFailed,
+            error.HttpConnectionClosing,
+            => {},
             else => return err,
         };
-        previous_server_was_shutdown = true;
+        previous_shutdown_servers += 1;
     }
 
     const forkpid = try std.posix.fork();
@@ -111,19 +115,19 @@ pub fn notifyServer(gpa: std.mem.Allocator, host: []const u8, port: u16) !void {
     defer client.deinit();
     const msg: Request.Api = .{ .action = .shutdown };
     var buf: [4096]u8 = undefined;
-    const payload = try std.fmt.bufPrint(&buf, "{f}\n", .{
+    const payload = std.fmt.bufPrint(&buf, "{f}\n", .{
         std.json.fmt(msg, .{
             .emit_null_optional_fields = false,
         }),
-    });
+    }) catch @panic("Buffer Overflow");
 
-    var api_url_buf: [128]u8 = undefined;
-    const api_url = try std.fmt.bufPrint(
+    var api_url_buf: [256]u8 = undefined;
+    const api_url = std.fmt.bufPrint(
         &api_url_buf,
         "http://{s}" ++ Request.Api.endpoint,
         .{host},
-    );
-    var uri = try std.Uri.parse(api_url);
+    ) catch @panic("Buffer Overflow");
+    var uri = std.Uri.parse(api_url) catch @panic("Host malformed!");
     uri.port = port;
 
     _ = try client.fetch(.{
@@ -161,7 +165,7 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     log.warn("\x1b[2K\rServing website at http://{f}/\n", .{tcp_server.listen_address.in});
 
-    if (!previous_server_was_shutdown) {
+    if (previous_shutdown_servers == 0) {
         if (std.process.getEnvVarOwned(gpa, "ZIG_DEVSERVER_OPEN_BROWSER") catch null) |open_browser| {
             defer gpa.free(open_browser);
             const url_str = try std.fmt.allocPrint(

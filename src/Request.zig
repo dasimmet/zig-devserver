@@ -93,7 +93,10 @@ fn handleWebsocket(req: *Request, sock: *std.http.Server.WebSocket) !void {
         var res_buf: [64]u8 = undefined;
         var bufs: [1][]const u8 = .{
             try std.fmt.bufPrint(&res_buf, "{f}", .{
-                std.json.fmt(.{ .start_time = req.start_time }, .{}),
+                std.json.fmt(.{
+                    .start_time = req.start_time,
+                    .bypass_cache = true,
+                }, .{}),
             }),
         };
         try sock.writeMessageVec(&bufs, .text);
@@ -103,8 +106,8 @@ fn handleWebsocket(req: *Request, sock: *std.http.Server.WebSocket) !void {
 
 fn recvWebSocketMessages(req: *Request, sock: *std.http.Server.WebSocket) void {
     while (true) {
-        const msg = sock.readSmallMessage() catch {
-            std.log.err("client disconnect: {s}", .{sock.key});
+        const msg = sock.readSmallMessage() catch |err| {
+            std.log.err("client disconnect: {s} {}", .{ sock.key, err });
             return;
         };
         if (msg.data.len == 0) continue;
@@ -112,7 +115,7 @@ fn recvWebSocketMessages(req: *Request, sock: *std.http.Server.WebSocket) void {
             req.ws_running = false;
             return;
         }
-        std.log.warn("msg: {} {s}", .{ msg.opcode, msg.data });
+        std.log.info("WebSocket msg: {} {s}", .{ msg.opcode, msg.data });
     }
 }
 
@@ -136,6 +139,7 @@ fn handleApi(req: *Request) !bool {
                     try req.http.respond("ok", .{});
                     std.process.exit(0);
                 },
+                .none => {},
                 // else => return error.MessageNotImplemented,
             }
         }

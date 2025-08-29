@@ -1,8 +1,9 @@
 const std = @import("std");
 
 action: enum {
+    none,
     shutdown,
-},
+} = .none,
 start_time: ?isize = null,
 
 pub const embedded = struct {
