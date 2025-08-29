@@ -170,7 +170,7 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
             defer gpa.free(open_browser);
             const url_str = try std.fmt.allocPrint(
                 gpa,
-                "http://{any}/{s}",
+                "http://{f}/{s}",
                 .{
                     tcp_server.listen_address.in,
                     if (open_browser.len > 0 and open_browser[0] == '/') open_browser[1..] else open_browser,
