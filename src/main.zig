@@ -197,6 +197,7 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
 
         request.gpa = gpa;
         request.public_dir = root_dir;
+        request.public_path = root_dir_path;
         request.start_time = start_time;
         request.conn = tcp_server.accept() catch |err| {
             switch (err) {

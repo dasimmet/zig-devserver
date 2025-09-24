@@ -11,6 +11,7 @@ const Request = @This();
 // Initialized by main.
 gpa: std.mem.Allocator,
 public_dir: std.fs.Dir,
+public_path: []const u8 = "",
 conn: std.net.Server.Connection,
 // Initialized by handle.
 allocator_arena: std.heap.ArenaAllocator,
@@ -70,13 +71,18 @@ pub fn handle(req: *Request) void {
     }
 
     const api = req.handleApi() catch |err| {
-        log.warn("Error {s} responding to request from {any} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
+        log.warn("Error {s} responding to request from {f} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
         return;
     };
     if (api) return;
 
+    if (req.handleChromeDevTools() catch |err| {
+        log.warn("Error {s} responding to request from {f} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
+        return;
+    }) return;
+
     req.handleFile() catch |err| {
-        log.warn("Error {s} responding to request from {any} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
+        log.warn("Error {s} responding to request from {f} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
     };
 }
 
@@ -282,6 +288,27 @@ fn handleFile(req: *Request) !void {
     var file_reader = file.reader(&.{});
     _ = try response.writer.sendFile(&file_reader, .unlimited);
     return response.end();
+}
+
+fn handleChromeDevTools(req: *Request) !bool {
+    const path = req.http.head.target;
+    if (std.mem.eql(u8, path, "/.well-known/appspecific/com.chrome.devtools.json")) {
+        log.info("{d}: chrome devtools: {s} - {s}", .{ std.time.timestamp(), path, "application/json" });
+        var buf: [8196]u8 = undefined;
+        const res = try std.fmt.bufPrint(&buf, "{f}\n", .{std.json.fmt(.{
+            .workspace = .{
+                .root = req.public_path,
+                .uuid = "6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b",
+            },
+        }, .{
+            .whitespace = .indent_4,
+        })});
+        try req.http.respond(res, .{ .extra_headers = &.{
+            .{ .name = "content-type", .value = "application/json" },
+        } });
+        return true;
+    }
+    return false;
 }
 
 fn handleDir(req: *Request, path: []const u8) !void {
