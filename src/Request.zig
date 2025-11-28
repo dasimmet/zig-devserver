@@ -286,7 +286,8 @@ fn handleFile(req: *Request) !void {
         },
     );
     var file_reader = file.reader(&.{});
-    _ = try response.writer.sendFile(&file_reader, .unlimited);
+    _ = try response.writer.sendFileAll(&file_reader, .unlimited);
+
     return response.end();
 }
 
