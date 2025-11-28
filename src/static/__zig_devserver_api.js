@@ -1,7 +1,8 @@
 
 window.setTimeout(() => {
     console.log("start __zig_devserver_api.js");
-    window.__zig_devserver_ws_url = window.location.href.replace("http://", "ws://").replace("https://", "wss://");
+    const tmp_url = window.location.href.replace("http://", "ws://").replace("https://", "wss://");
+    window.__zig_devserver_ws_url = tmp_url.replace(/#.*/, '').replace(/\?.*/, '')
     window.__zig_devserver_reload_time = 0;
     const connect_ws = async () => {
 
