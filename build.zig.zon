@@ -2,7 +2,7 @@
     .name = .devserver,
     .fingerprint = 0x1b9afb9db89b6f99,
     .version = "0.0.2",
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.16.0-dev.1484+d0ba6642b",
     .dependencies = .{
         .mime = .{
             .url = "git+https://github.com/andrewrk/mime.git?ref=4.0.0#4535b74bd5fcaa03e22f2f25af164a4c6253af00",

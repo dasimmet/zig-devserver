@@ -14,6 +14,11 @@ pub fn main() !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = general_purpose_allocator.deinit();
     const gpa = general_purpose_allocator.allocator();
+
+    var threaded = std.Io.Threaded.init(gpa);
+    defer threaded.deinit();
+    const io = threaded.io();
+
     const args = try std.process.argsAlloc(gpa);
     defer std.process.argsFree(gpa, args);
 
@@ -22,7 +27,7 @@ pub fn main() !void {
     });
 
     if (args.len < 2) {
-        try usage(gpa, args);
+        try usage(io, gpa, args);
         std.process.exit(1);
     }
 
@@ -38,15 +43,16 @@ pub fn main() !void {
         .{ "watch", watchServer },
     }) |cmd| {
         if (std.mem.eql(u8, args[1], cmd[0])) {
-            return cmd[1](gpa, args[2..]);
+            return cmd[1](io, gpa, args[2..]);
         }
     }
     log.err("unknown subcommand: {s}", .{args[1]});
-    try usage(gpa, args[2..]);
+    try usage(io, gpa, args[2..]);
     std.process.exit(1);
 }
 
-pub fn usage(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
+pub fn usage(io: std.Io, gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
+    _ = io;
     _ = gpa;
     var outbuf: [64]u8 = undefined;
     var stdout = std.fs.File.stdout().writer(&outbuf).interface;
@@ -67,7 +73,7 @@ pub fn usage(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     );
 }
 
-pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
+pub fn watchServer(io: std.Io, gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     if (args.len != 3) {
         return error.IncorrectNumberOfArguments;
     }
@@ -84,7 +90,7 @@ pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     previous_shutdown_servers = 0;
     for (0..2) |_| {
-        notifyServer(gpa, args[0], port) catch |err| switch (err) {
+        notifyServer(io, gpa, args[0], port) catch |err| switch (err) {
             error.ConnectionRefused => break, // no server found.
             error.ConnectionResetByPeer,
             error.ReadFailed,
@@ -105,11 +111,17 @@ pub fn watchServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     }
 
     const smp = std.heap.smp_allocator;
-    return startServer(smp, args);
+    return startServer(io, smp, args);
 }
 
-pub fn notifyServer(gpa: std.mem.Allocator, host: []const u8, port: u16) !void {
+pub fn notifyServer(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    host: []const u8,
+    port: u16,
+) !void {
     var client = std.http.Client{
+        .io = io,
         .allocator = gpa,
     };
     defer client.deinit();
@@ -135,10 +147,10 @@ pub fn notifyServer(gpa: std.mem.Allocator, host: []const u8, port: u16) !void {
         .payload = payload,
         .method = .POST,
     });
-    std.Thread.sleep(std.time.ns_per_s);
+    try io.sleep(.fromSeconds(1), .awake);
 }
 
-pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
+pub fn startServer(io: std.Io, gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     if (args.len != 3) {
         return error.IncorrectNumberOfArguments;
     }
@@ -150,20 +162,20 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     var root_dir: std.fs.Dir = try std.fs.cwd().openDir(root_dir_path, .{});
     defer root_dir.close();
 
-    const start_time = std.time.timestamp();
+    const start_time = try std.Io.Clock.real.now(io);
     var request_pool: std.Thread.Pool = undefined;
     try request_pool.init(.{
         .allocator = gpa,
     });
     defer request_pool.deinit();
 
-    const address = try std.net.Address.parseIp(host, port);
-    var tcp_server = try address.listen(.{
+    const address = try std.Io.net.IpAddress.parse(host, port);
+    var tcp_server = try address.listen(io, .{
         .reuse_address = true,
     });
-    defer tcp_server.deinit();
+    defer tcp_server.deinit(io);
 
-    log.warn("\x1b[2K\rServing website at http://{f}/\n", .{tcp_server.listen_address.in});
+    log.warn("\x1b[2K\rServing website at http://{f}/\n", .{tcp_server.socket.address});
 
     if (previous_shutdown_servers == 0) {
         if (std.process.getEnvVarOwned(gpa, "ZIG_DEVSERVER_OPEN_BROWSER") catch null) |open_browser| {
@@ -172,7 +184,7 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
                 gpa,
                 "http://{f}/{s}",
                 .{
-                    tcp_server.listen_address.in,
+                    tcp_server.socket.address,
                     if (open_browser.len > 0 and open_browser[0] == '/') open_browser[1..] else open_browser,
                 },
             );
@@ -195,13 +207,14 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
     accept: while (true) {
         const request = try gpa.create(Request);
 
+        request.io = io;
         request.gpa = gpa;
         request.public_dir = root_dir;
         request.public_path = root_dir_path;
         request.start_time = start_time;
-        request.conn = tcp_server.accept() catch |err| {
+        request.stream = tcp_server.accept(io) catch |err| {
             switch (err) {
-                error.ConnectionAborted, error.ConnectionResetByPeer => {
+                error.ConnectionAborted => {
                     log.warn("{s} on lister accept", .{@errorName(err)});
                     gpa.destroy(request);
                     continue :accept;
@@ -212,15 +225,17 @@ pub fn startServer(gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
         };
 
         if (maybe_ppid) |ppid| {
-            std.posix.kill(ppid, 0) catch |err| {
-                log.info("parent process {d} not found: {}. exiting devserver", .{ ppid, err });
-                return;
-            };
+            // TODO: reenable after https://codeberg.org/ziglang/zig/issues/30057
+            _ = ppid;
+            // std.posix.kill(ppid, 0) catch |err| {
+            //     log.info("parent process {d} not found: {}. exiting devserver", .{ ppid, err });
+            //     return;
+            // };
         }
 
         request_pool.spawn(Request.handle, .{request}) catch |err| {
             log.err("Error spawning request response thread: {s}", .{@errorName(err)});
-            request.conn.stream.close();
+            request.stream.close(io);
             gpa.destroy(request);
         };
     }

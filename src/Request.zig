@@ -9,10 +9,11 @@ pub const Api = @import("Api.zig");
 const Request = @This();
 // Fields are in initialization order.
 // Initialized by main.
+io: std.Io,
 gpa: std.mem.Allocator,
 public_dir: std.fs.Dir,
 public_path: []const u8 = "",
-conn: std.net.Server.Connection,
+stream: std.Io.net.Stream,
 // Initialized by handle.
 allocator_arena: std.heap.ArenaAllocator,
 allocator: std.mem.Allocator,
@@ -22,12 +23,12 @@ http: std.http.Server.Request,
 buffer: [1024]u8,
 response_buffer: [4000]u8,
 // timestamp of the server's start
-start_time: isize,
+start_time: std.Io.Timestamp,
 ws_running: bool,
 
 pub fn handle(req: *Request) void {
     defer req.gpa.destroy(req);
-    defer req.conn.stream.close();
+    defer req.stream.close(req.io);
 
     req.allocator_arena = std.heap.ArenaAllocator.init(req.gpa);
     defer req.allocator_arena.deinit();
@@ -35,10 +36,10 @@ pub fn handle(req: *Request) void {
 
     var send_buffer: [4096]u8 = undefined;
     var recv_buffer: [4096]u8 = undefined;
-    var connection_reader = req.conn.stream.reader(&recv_buffer);
-    var connection_writer = req.conn.stream.writer(&send_buffer);
+    var connection_reader = req.stream.reader(req.io, &recv_buffer);
+    var connection_writer = req.stream.writer(req.io, &send_buffer);
 
-    var http_server: std.http.Server = .init(connection_reader.interface(), &connection_writer.interface);
+    var http_server: std.http.Server = .init(&connection_reader.interface, &connection_writer.interface);
 
     req.http = http_server.receiveHead() catch |err| {
         if (err != error.HttpConnectionClosing) {
@@ -71,18 +72,18 @@ pub fn handle(req: *Request) void {
     }
 
     const api = req.handleApi() catch |err| {
-        log.warn("Error {s} responding to request from {f} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
+        log.warn("Error {s} responding to request from {f} for {s}", .{ @errorName(err), req.stream.socket.address, req.http.head.target });
         return;
     };
     if (api) return;
 
     if (req.handleChromeDevTools() catch |err| {
-        log.warn("Error {s} responding to request from {f} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
+        log.warn("Error {s} responding to request from {f} for {s}", .{ @errorName(err), req.stream.socket.address, req.http.head.target });
         return;
     }) return;
 
     req.handleFile() catch |err| {
-        log.warn("Error {s} responding to request from {f} for {s}", .{ @errorName(err), req.conn.address, req.http.head.target });
+        log.warn("Error {s} responding to request from {f} for {s}", .{ @errorName(err), req.stream.socket.address, req.http.head.target });
     };
 }
 
@@ -106,7 +107,7 @@ fn handleWebsocket(req: *Request, sock: *std.http.Server.WebSocket) !void {
             }),
         };
         try sock.writeMessageVec(&bufs, .text);
-        std.Thread.sleep(5 * std.time.ns_per_s);
+        try req.io.sleep(.fromSeconds(5), .awake);
     }
 }
 
@@ -180,7 +181,8 @@ fn handleFile(req: *Request) !void {
 
     if (std.mem.eql(u8, path, Api.js_endpoint)) {
         const reload_js = Api.embedded.js;
-        log.debug("{d}: {s} - {s}", .{ std.time.timestamp(), path, "application/javascript" });
+        const ts = try std.Io.Clock.real.now(req.io);
+        log.debug("{d}: {s} - {s}", .{ ts.toSeconds(), path, "application/javascript" });
         return req.http.respond(reload_js, .{
             .extra_headers = &([_]std.http.Header{
                 .{ .name = "content-type", .value = "application/javascript" },
@@ -198,7 +200,8 @@ fn handleFile(req: *Request) !void {
                 return req.handleDir(std.fs.path.dirname(path) orelse ".");
             }
             if (std.mem.eql(u8, path, "favicon.ico")) {
-                log.info("{d}: {s} - {s}", .{ std.time.timestamp(), path, "image/x-icon" });
+                const ts = try std.Io.Clock.real.now(req.io);
+                log.info("{d}: {s} - {s}", .{ ts.toSeconds(), path, "image/x-icon" });
                 return req.http.respond(Api.embedded.favicon, .{
                     .extra_headers = &([_]std.http.Header{
                         .{ .name = "content-type", .value = "image/x-icon" },
@@ -247,10 +250,12 @@ fn handleFile(req: *Request) !void {
             break :blk @tagName(mt);
         },
     };
-    log.info("{d}: {s} - {s}", .{ std.time.timestamp(), path, content_type });
+    const ts = try std.Io.Clock.real.now(req.io);
+    log.info("{d}: {s} - {s}", .{ ts.toSeconds(), path, content_type });
 
     if (mime_type == .@"text/html") {
-        const content = try file.readToEndAlloc(req.allocator, std.math.maxInt(u32));
+        var content_reader = file.reader(req.io, &.{});
+        const content = try content_reader.interface.allocRemaining(req.allocator, .limited(std.math.maxInt(u32)));
         defer req.allocator.free(content);
 
         var response = try req.http.respondStreaming(
@@ -285,7 +290,7 @@ fn handleFile(req: *Request) !void {
             },
         },
     );
-    var file_reader = file.reader(&.{});
+    var file_reader = file.reader(req.io, &.{});
     _ = try response.writer.sendFileAll(&file_reader, .unlimited);
 
     return response.end();
@@ -294,7 +299,8 @@ fn handleFile(req: *Request) !void {
 fn handleChromeDevTools(req: *Request) !bool {
     const path = req.http.head.target;
     if (std.mem.eql(u8, path, "/.well-known/appspecific/com.chrome.devtools.json")) {
-        log.info("{d}: chrome devtools: {s} - {s}", .{ std.time.timestamp(), path, "application/json" });
+        const ts = try std.Io.Clock.real.now(req.io);
+        log.info("{d}: chrome devtools: {s} - {s}", .{ ts.toSeconds(), path, "application/json" });
         var buf: [8196]u8 = undefined;
         const res = try std.fmt.bufPrint(&buf, "{f}\n", .{std.json.fmt(.{
             .workspace = .{
@@ -313,7 +319,8 @@ fn handleChromeDevTools(req: *Request) !bool {
 }
 
 fn handleDir(req: *Request, path: []const u8) !void {
-    log.info("{d}: {s}", .{ std.time.timestamp(), path });
+    const ts = try std.Io.Clock.real.now(req.io);
+    log.info("{d}: {s}", .{ ts.toSeconds(), path });
 
     const dir = req.public_dir.openDir(path, .{
         .iterate = true,
