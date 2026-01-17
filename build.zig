@@ -45,6 +45,7 @@ pub fn serveDir(b: *std.Build, opt: ServerOptions) *Run {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const watch = b.option(bool, "watch", "use watch and restart mode");
 
     const exe = compileServer(b, target, optimize);
     b.installArtifact(exe);
@@ -73,6 +74,7 @@ pub fn build(b: *std.Build) void {
     {
         const dev = serveDirInternal(b, exe, .{
             .port = port,
+            .watch = watch,
             .open_browser = open_browser,
             .directory = .serveInstall("www"),
         });
@@ -85,33 +87,35 @@ pub fn build(b: *std.Build) void {
             "serve-dir",
             "path to directory for 'run-lazypath-option'",
         ) orelse b.path("");
-        const watch = serveDirInternal(b, exe, .{
+        const watch_run = serveDirInternal(b, exe, .{
             .port = port,
             .open_browser = open_browser,
             .directory = .serveLazyPath(serve_dir),
         });
 
-        b.step("run-lazypath-option", "run the server on a lazypath provided by the '-Dserve-dir=' option").dependOn(&watch.step);
+        b.step("run-lazypath-option", "run the server on a lazypath provided by the '-Dserve-dir=' option").dependOn(&watch_run.step);
     }
     {
-        const watch = serveDirInternal(b, exe, .{
+        const watch_run = serveDirInternal(b, exe, .{
             .port = port,
+            .watch = watch,
             .open_browser = open_browser,
             .directory = .serveLazyPath(b.path("src")),
         });
 
-        b.step("run-lazypath-src", "run the server on a lazypath in src").dependOn(&watch.step);
+        b.step("run-lazypath-src", "run the server on a lazypath in src").dependOn(&watch_run.step);
     }
     {
         const wf = b.addWriteFiles();
         _ = wf.add("test.txt", "\nAll your codebase are belong to us!\n");
-        const watch = serveDirInternal(b, exe, .{
+        const watch_run = serveDirInternal(b, exe, .{
             .port = port,
+            .watch = watch,
             .open_browser = open_browser,
             .directory = .serveLazyPath(wf.getDirectory()),
         });
 
-        b.step("run-lazypath-wf", "run the server on a writefiles' lazypath").dependOn(&watch.step);
+        b.step("run-lazypath-wf", "run the server on a writefiles' lazypath").dependOn(&watch_run.step);
     }
 }
 
@@ -125,24 +129,26 @@ pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Ru
     if (maybe_ppid) |ppid| {
         run.setEnvironmentVariable("PPID", ppid);
     }
-    var watch = opt.watch orelse false;
-    if (opt.watch == null) {
-        // TODO: find a better way to determine we are running zig build in
-        // watch mode.
-        // for now, we iterate all original arguments and check if a --watch is
-        // in there.
-        const args = std.process.argsAlloc(b.allocator) catch unreachable;
-        defer std.process.argsFree(b.allocator, args);
-        for (args) |arg| {
-            if (std.mem.eql(u8, arg, "--")) {
-                break;
-            }
-            if (std.mem.eql(u8, arg, "--watch")) {
-                watch = true;
-                break;
-            }
-        }
-    }
+    const watch = opt.watch orelse false;
+    // if (opt.watch == null) {
+    //     // TODO: find a better way to determine we are running zig build in
+    //     // watch mode.
+    //     // we used to iterate all original arguments and check if a --watch is
+    //     // in there.
+    //     // as of 0.16.X we dont have an easy way to get all build runner arguments anymore, do we?
+
+    //     const args = std.process.argsAlloc(b.allocator) catch unreachable;
+    //     defer std.process.argsFree(b.allocator, args);
+    //     for (args) |arg| {
+    //         if (std.mem.eql(u8, arg, "--")) {
+    //             break;
+    //         }
+    //         if (std.mem.eql(u8, arg, "--watch")) {
+    //             watch = true;
+    //             break;
+    //         }
+    //     }
+    // }
 
     run.addArg(if (watch) "watch" else "serve");
     run.addArg(opt.host);
@@ -175,7 +181,7 @@ fn compileServer(b: *std.Build, target: ResolvedTarget, optimize: OptimizeMode) 
         }),
     });
     switch (target.result.os.tag) {
-        .windows => exe.linkLibC(),
+        .windows => exe.root_module.link_libc = true,
         else => {},
     }
 
