@@ -5,7 +5,7 @@ a webserver that reloads the page when `zig build dev --watch` rebuilds your con
 try it with:
 
 ```
-zig build dev --watch -Dopen-browser=index.html
+zig build dev --watch -Dwatch -Dopen-browser=index.html
 ```
 
 and then edit `src/index.html` and have the browser tab reload.
@@ -36,6 +36,10 @@ pub fn build(b: *std.Build) void {
 
         // provide a port to listen on
         .port = b.option(u16, "port", "dev server port") orelse 8080,
+
+        // enable rebuild and restart on changes.
+        // setting this to true only works with "zig build --watch"
+        .watch = true,
 
         // optionally provide a path to open
         .open_browser = b.option(
