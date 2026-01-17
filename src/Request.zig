@@ -11,7 +11,7 @@ const Request = @This();
 // Initialized by main.
 io: std.Io,
 gpa: std.mem.Allocator,
-public_dir: std.fs.Dir,
+public_dir: std.Io.Dir,
 public_path: []const u8 = "",
 stream: std.Io.net.Stream,
 // Initialized by handle.
@@ -194,7 +194,7 @@ fn handleFile(req: *Request) !void {
     const mime_type = mime.extension_map.get(std.fs.path.extension(path)) orelse
         .@"application/octet-stream";
 
-    const file = req.public_dir.openFile(path, .{}) catch |err| switch (err) {
+    const file = req.public_dir.openFile(req.io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
             if (is_dir_index) {
                 return req.handleDir(std.fs.path.dirname(path) orelse ".");
@@ -219,9 +219,9 @@ fn handleFile(req: *Request) !void {
             return err;
         },
     };
-    defer file.close();
+    defer file.close(req.io);
 
-    const stat: std.fs.File.Stat = file.stat() catch |err| {
+    const stat: std.Io.File.Stat = file.stat(req.io) catch |err| {
         req.serveError("accessing resource", .internal_server_error);
         return err;
     };
@@ -322,7 +322,7 @@ fn handleDir(req: *Request, path: []const u8) !void {
     const ts = try std.Io.Clock.real.now(req.io);
     log.info("{d}: {s}", .{ ts.toSeconds(), path });
 
-    const dir = req.public_dir.openDir(path, .{
+    const dir = req.public_dir.openDir(req.io, path, .{
         .iterate = true,
     }) catch |err| switch (err) {
         error.FileNotFound => {
@@ -366,7 +366,7 @@ fn handleDir(req: *Request, path: []const u8) !void {
     if (!std.mem.eql(u8, path, ".")) {
         try response.writeAll("<a href=\"..\"><li>..</li></a>");
     }
-    while (try iter.next()) |entry| {
+    while (try iter.next(req.io)) |entry| {
         switch (entry.kind) {
             .directory, .file, .sym_link => {},
             else => continue,

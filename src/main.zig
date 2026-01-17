@@ -10,24 +10,14 @@ const log = std.log;
 
 var previous_shutdown_servers: u8 = 0;
 
-pub fn main() !void {
-    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = general_purpose_allocator.deinit();
-    const gpa = general_purpose_allocator.allocator();
-
-    var threaded = std.Io.Threaded.init(gpa);
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
-
+pub fn main(init: std.process.Init) !void {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
     log.info("server args: {f}", .{
         std.json.fmt(args, .{}),
     });
 
     if (args.len < 2) {
-        try usage(io, gpa, args);
+        try usage(init, args);
         std.process.exit(1);
     }
 
@@ -43,19 +33,17 @@ pub fn main() !void {
         .{ "watch", watchServer },
     }) |cmd| {
         if (std.mem.eql(u8, args[1], cmd[0])) {
-            return cmd[1](io, gpa, args[2..]);
+            return cmd[1](init, args[2..]);
         }
     }
     log.err("unknown subcommand: {s}", .{args[1]});
-    try usage(io, gpa, args[2..]);
+    try usage(init, args[2..]);
     std.process.exit(1);
 }
 
-pub fn usage(io: std.Io, gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
-    _ = io;
-    _ = gpa;
+pub fn usage(init: std.process.Init, args: []const [:0]const u8) !void {
     var outbuf: [64]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&outbuf).interface;
+    var stdout = std.Io.File.stdout().writer(init.io, &outbuf).interface;
     try stdout.print("args: {f}\n", .{
         std.json.fmt(args, .{}),
     });
@@ -73,7 +61,7 @@ pub fn usage(io: std.Io, gpa: std.mem.Allocator, args: []const [:0]const u8) !vo
     );
 }
 
-pub fn watchServer(io: std.Io, gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
+pub fn watchServer(init: std.process.Init, args: []const [:0]const u8) !void {
     if (args.len != 3) {
         return error.IncorrectNumberOfArguments;
     }
@@ -83,14 +71,14 @@ pub fn watchServer(io: std.Io, gpa: std.mem.Allocator, args: []const [:0]const u
         log.err("we cannot terminate a forked server on an unknown port.", .{});
         return error.Port0NotSupported;
     }
-    if (!try std.process.hasEnvVar(gpa, "PPID")) {
+    if (!init.environ_map.contains("PPID")) {
         std.log.err("env var PPID not found. watch will fork and never stop otherwise.", .{});
         return error.MissingEnvVar;
     }
 
     previous_shutdown_servers = 0;
     for (0..2) |_| {
-        notifyServer(io, gpa, args[0], port) catch |err| switch (err) {
+        notifyServer(init.io, init.gpa, args[0], port) catch |err| switch (err) {
             error.ConnectionRefused => break, // no server found.
             error.ConnectionResetByPeer,
             error.ReadFailed,
@@ -101,17 +89,15 @@ pub fn watchServer(io: std.Io, gpa: std.mem.Allocator, args: []const [:0]const u
         previous_shutdown_servers += 1;
     }
 
-    const forkpid = try std.posix.fork();
+    const forkpid = std.os.linux.fork();
 
-    if (forkpid < 0) {
-        return error.ForkFailed;
-    } else if (forkpid > 0) {
+    if (forkpid > 0) {
         // we stop the parent process
         std.process.exit(0);
     }
 
-    const smp = std.heap.smp_allocator;
-    return startServer(io, smp, args);
+    // const smp = std.heap.smp_allocator;
+    return startServer(init, args);
 }
 
 pub fn notifyServer(
@@ -150,7 +136,7 @@ pub fn notifyServer(
     try io.sleep(.fromSeconds(1), .awake);
 }
 
-pub fn startServer(io: std.Io, gpa: std.mem.Allocator, args: []const [:0]const u8) !void {
+pub fn startServer(init: std.process.Init, args: []const [:0]const u8) !void {
     if (args.len != 3) {
         return error.IncorrectNumberOfArguments;
     }
@@ -159,64 +145,59 @@ pub fn startServer(io: std.Io, gpa: std.mem.Allocator, args: []const [:0]const u
     const port = try std.fmt.parseInt(u16, args[1], 10);
 
     const root_dir_path = args[2];
-    var root_dir: std.fs.Dir = try std.fs.cwd().openDir(root_dir_path, .{});
-    defer root_dir.close();
+    var root_dir: std.Io.Dir = try std.Io.Dir.cwd().openDir(init.io, root_dir_path, .{});
+    defer root_dir.close(init.io);
 
-    const start_time = try std.Io.Clock.real.now(io);
-    var request_pool: std.Thread.Pool = undefined;
-    try request_pool.init(.{
-        .allocator = gpa,
-    });
-    defer request_pool.deinit();
+    const start_time = try std.Io.Clock.real.now(init.io);
+
+    var request_group = std.Io.Group.init;
 
     const address = try std.Io.net.IpAddress.parse(host, port);
-    var tcp_server = try address.listen(io, .{
+    var tcp_server = try address.listen(init.io, .{
         .reuse_address = true,
     });
-    defer tcp_server.deinit(io);
+    defer tcp_server.deinit(init.io);
 
     log.warn("\x1b[2K\rServing website at http://{f}/\n", .{tcp_server.socket.address});
 
     if (previous_shutdown_servers == 0) {
-        if (std.process.getEnvVarOwned(gpa, "ZIG_DEVSERVER_OPEN_BROWSER") catch null) |open_browser| {
-            defer gpa.free(open_browser);
+        if (init.environ_map.get("ZIG_DEVSERVER_OPEN_BROWSER")) |open_browser| {
             const url_str = try std.fmt.allocPrint(
-                gpa,
+                init.gpa,
                 "http://{f}/{s}",
                 .{
                     tcp_server.socket.address,
                     if (open_browser.len > 0 and open_browser[0] == '/') open_browser[1..] else open_browser,
                 },
             );
-            defer gpa.free(url_str);
+            defer init.gpa.free(url_str);
             std.log.info("opening in browser: {s}", .{url_str});
-            const res = try std.process.Child.run(.{
-                .allocator = gpa,
+            const res = try std.process.run(init.gpa, init.io, .{
                 .argv = &.{ open_command, url_str },
             });
-            gpa.free(res.stderr);
-            gpa.free(res.stdout);
+            init.gpa.free(res.stderr);
+            init.gpa.free(res.stdout);
         }
     }
 
     const maybe_ppid: ?std.posix.pid_t = blk: {
-        const ppid = std.process.getEnvVarOwned(gpa, "PPID") catch break :blk null;
+        const ppid = init.environ_map.get("PPID") orelse break :blk null;
         break :blk std.fmt.parseInt(std.posix.pid_t, ppid, 10) catch null;
     };
 
     accept: while (true) {
-        const request = try gpa.create(Request);
+        const request = try init.gpa.create(Request);
 
-        request.io = io;
-        request.gpa = gpa;
+        request.io = init.io;
+        request.gpa = init.gpa;
         request.public_dir = root_dir;
         request.public_path = root_dir_path;
         request.start_time = start_time;
-        request.stream = tcp_server.accept(io) catch |err| {
+        request.stream = tcp_server.accept(init.io) catch |err| {
             switch (err) {
                 error.ConnectionAborted => {
                     log.warn("{s} on lister accept", .{@errorName(err)});
-                    gpa.destroy(request);
+                    init.gpa.destroy(request);
                     continue :accept;
                 },
                 else => {},
@@ -225,19 +206,13 @@ pub fn startServer(io: std.Io, gpa: std.mem.Allocator, args: []const [:0]const u
         };
 
         if (maybe_ppid) |ppid| {
-            // TODO: reenable after https://codeberg.org/ziglang/zig/issues/30057
-            _ = ppid;
-            // std.posix.kill(ppid, 0) catch |err| {
-            //     log.info("parent process {d} not found: {}. exiting devserver", .{ ppid, err });
-            //     return;
-            // };
+            std.posix.kill(ppid, @enumFromInt(0)) catch |err| {
+                log.info("parent process {d} not found: {}. exiting devserver", .{ ppid, err });
+                return;
+            };
         }
 
-        request_pool.spawn(Request.handle, .{request}) catch |err| {
-            log.err("Error spawning request response thread: {s}", .{@errorName(err)});
-            request.stream.close(io);
-            gpa.destroy(request);
-        };
+        request_group.async(init.io, Request.handle, .{request});
     }
 }
 
