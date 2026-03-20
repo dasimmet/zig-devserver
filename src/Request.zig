@@ -181,7 +181,7 @@ fn handleFile(req: *Request) !void {
 
     if (std.mem.eql(u8, path, Api.js_endpoint)) {
         const reload_js = Api.embedded.js;
-        const ts = try std.Io.Clock.real.now(req.io);
+        const ts = std.Io.Clock.real.now(req.io);
         log.debug("{d}: {s} - {s}", .{ ts.toSeconds(), path, "application/javascript" });
         return req.http.respond(reload_js, .{
             .extra_headers = &([_]std.http.Header{
@@ -200,7 +200,7 @@ fn handleFile(req: *Request) !void {
                 return req.handleDir(std.fs.path.dirname(path) orelse ".");
             }
             if (std.mem.eql(u8, path, "favicon.ico")) {
-                const ts = try std.Io.Clock.real.now(req.io);
+                const ts = std.Io.Clock.real.now(req.io);
                 log.info("{d}: {s} - {s}", .{ ts.toSeconds(), path, "image/x-icon" });
                 return req.http.respond(Api.embedded.favicon, .{
                     .extra_headers = &([_]std.http.Header{
@@ -250,7 +250,7 @@ fn handleFile(req: *Request) !void {
             break :blk @tagName(mt);
         },
     };
-    const ts = try std.Io.Clock.real.now(req.io);
+    const ts = std.Io.Clock.real.now(req.io);
     log.info("{d}: {s} - {s}", .{ ts.toSeconds(), path, content_type });
 
     if (mime_type == .@"text/html") {
@@ -299,7 +299,7 @@ fn handleFile(req: *Request) !void {
 fn handleChromeDevTools(req: *Request) !bool {
     const path = req.http.head.target;
     if (std.mem.eql(u8, path, "/.well-known/appspecific/com.chrome.devtools.json")) {
-        const ts = try std.Io.Clock.real.now(req.io);
+        const ts = std.Io.Clock.real.now(req.io);
         log.info("{d}: chrome devtools: {s} - {s}", .{ ts.toSeconds(), path, "application/json" });
         var buf: [8196]u8 = undefined;
         const res = try std.fmt.bufPrint(&buf, "{f}\n", .{std.json.fmt(.{
@@ -319,7 +319,7 @@ fn handleChromeDevTools(req: *Request) !bool {
 }
 
 fn handleDir(req: *Request, path: []const u8) !void {
-    const ts = try std.Io.Clock.real.now(req.io);
+    const ts = std.Io.Clock.real.now(req.io);
     log.info("{d}: {s}", .{ ts.toSeconds(), path });
 
     const dir = req.public_dir.openDir(req.io, path, .{

@@ -148,7 +148,7 @@ pub fn startServer(init: std.process.Init, args: []const [:0]const u8) !void {
     var root_dir: std.Io.Dir = try std.Io.Dir.cwd().openDir(init.io, root_dir_path, .{});
     defer root_dir.close(init.io);
 
-    const start_time = try std.Io.Clock.real.now(init.io);
+    const start_time = std.Io.Clock.real.now(init.io);
 
     var request_group = std.Io.Group.init;
 
