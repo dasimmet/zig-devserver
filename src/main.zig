@@ -79,11 +79,15 @@ pub fn watchServer(init: std.process.Init, args: []const [:0]const u8) !void {
     previous_shutdown_servers = 0;
     for (0..2) |_| {
         notifyServer(init.io, init.gpa, args[0], port) catch |err| switch (err) {
-            error.ConnectionRefused => break, // no server found.
+            error.ConnectionRefused => {
+                try init.io.sleep(.fromSeconds(1), .awake);
+            }, // no server found.
             error.ConnectionResetByPeer,
             error.ReadFailed,
             error.HttpConnectionClosing,
-            => {},
+            => {
+                try init.io.sleep(.fromSeconds(1), .awake);
+            },
             else => return err,
         };
         previous_shutdown_servers += 1;
@@ -158,8 +162,6 @@ pub fn startServer(init: std.process.Init, args: []const [:0]const u8) !void {
     });
     defer tcp_server.deinit(init.io);
 
-    log.warn("\x1b[2K\rServing website at http://{f}/\n", .{tcp_server.socket.address});
-
     if (previous_shutdown_servers == 0) {
         if (init.environ_map.get("ZIG_DEVSERVER_OPEN_BROWSER")) |open_browser| {
             const url_str = try std.fmt.allocPrint(
@@ -185,6 +187,7 @@ pub fn startServer(init: std.process.Init, args: []const [:0]const u8) !void {
         break :blk std.fmt.parseInt(std.posix.pid_t, ppid, 10) catch null;
     };
 
+    log.warn("\x1b[2K\rServing website at http://{f}/\n", .{tcp_server.socket.address});
     accept: while (true) {
         const request = try init.gpa.create(Request);
 
@@ -204,6 +207,7 @@ pub fn startServer(init: std.process.Init, args: []const [:0]const u8) !void {
             }
             return err;
         };
+        // log.warn("req: {any}", .{request});
 
         if (maybe_ppid) |ppid| {
             std.posix.kill(ppid, @enumFromInt(0)) catch |err| {
