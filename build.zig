@@ -37,7 +37,7 @@ pub const ServePath = union(enum) {
 pub fn serveDir(b: *std.Build, opt: ServerOptions) *Run {
     const this_dep = b.dependencyFromBuildZig(@This(), .{
         .target = opt.target orelse b.graph.host,
-        .optimize = opt.optimize orelse .ReleaseFast,
+        .optimize = opt.optimize orelse .fast,
     });
     return serveDirInternal(b, this_dep.artifact("devserver"), opt);
 }
@@ -61,8 +61,12 @@ pub fn build(b: *std.Build) void {
     if (maybe_ppid) |ppid| {
         run.setEnvironmentVariable("PPID", ppid);
     }
-    if (b.args) |args| {
-        run.addArgs(args);
+    if (@hasField(@TypeOf(b.*), "args")) {
+        if (b.args) |args| {
+            run.addArgs(args);
+        }
+    } else {
+        run.addPassthruArgs();
     }
     b.step("run-with-args", "run the server binary with arguments").dependOn(&run.step);
 
@@ -155,7 +159,11 @@ pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Ru
     run.addArg(b.fmt("{d}", .{opt.port}));
     switch (opt.directory) {
         .install => |subdir| {
-            run.addArg(b.pathJoin(&.{ b.install_path, subdir }));
+            if (@hasField(@TypeOf(b.*), "install_path")) {
+                run.addArg(b.pathJoin(&.{ b.install_path, subdir }));
+            } else {
+                run.addDirectoryArg(.{ .relative = .{ .base = .install_prefix, .sub_path = subdir } });
+            }
             const install_step = b.getInstallStep();
             run.step.dependOn(install_step);
             for (install_step.dependencies.items) |it| {
