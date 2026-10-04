@@ -5,6 +5,7 @@ const mime = @import("mime");
 const log = std.log;
 
 pub const Api = @import("Api.zig");
+pub const Watcher = @import("Watcher.zig");
 
 const Request = @This();
 // Fields are in initialization order.
@@ -14,17 +15,18 @@ gpa: std.mem.Allocator,
 public_dir: std.Io.Dir,
 public_path: []const u8 = "",
 stream: std.Io.net.Stream,
+broker: *Watcher.Broker,
+on_shutdown: ?*const fn (?*anyopaque) void = null,
+shutdown_ctx: ?*anyopaque = null,
 // Initialized by handle.
-allocator_arena: std.heap.ArenaAllocator,
-allocator: std.mem.Allocator,
-http: std.http.Server.Request,
+allocator_arena: std.heap.ArenaAllocator = undefined,
+allocator: std.mem.Allocator = undefined,
+http: std.http.Server.Request = undefined,
 
 // Not initialized in this code but utilized by http server.
-buffer: [1024]u8,
-response_buffer: [4000]u8,
-// timestamp of the server's start
-start_time: std.Io.Timestamp,
-ws_running: bool,
+buffer: [1024]u8 = undefined,
+response_buffer: [4000]u8 = undefined,
+ws_running: std.atomic.Value(bool) = .init(false),
 
 pub fn handle(req: *Request) void {
     defer req.gpa.destroy(req);
@@ -93,33 +95,45 @@ const common_headers = [_]std.http.Header{
 };
 
 fn handleWebsocket(req: *Request, sock: *std.http.Server.WebSocket) !void {
-    req.ws_running = true;
+    req.ws_running.store(true, .release);
     const recv_thread = try std.Thread.spawn(.{}, recvWebSocketMessages, .{ req, sock });
-    defer recv_thread.join();
-    while (req.ws_running) {
-        var res_buf: [64]u8 = undefined;
+    defer {
+        req.ws_running.store(false, .release);
+        req.stream.shutdown(req.io, .both) catch {};
+        recv_thread.join();
+    }
+
+    while (req.ws_running.load(.acquire) and !req.broker.stop.load(.acquire)) {
+        const seq_before_send = req.broker.seq.load(.acquire);
+        var res_buf: [128]u8 = undefined;
         var bufs: [1][]const u8 = .{
             try std.fmt.bufPrint(&res_buf, "{f}", .{
                 std.json.fmt(.{
-                    .start_time = req.start_time,
+                    .start_time = req.broker.currentReloadTime(),
                     .bypass_cache = true,
                 }, .{}),
             }),
         };
         try sock.writeMessageVec(&bufs, .text);
-        try req.io.sleep(.fromSeconds(5), .awake);
+        req.broker.waitForChange(req.io, seq_before_send, 5 * std.time.ns_per_s) catch return;
+    }
+    if (req.broker.stop.load(.acquire)) {
+        sock.writeMessage("", .connection_close) catch {};
     }
 }
 
 fn recvWebSocketMessages(req: *Request, sock: *std.http.Server.WebSocket) void {
-    while (true) {
+    while (req.ws_running.load(.acquire)) {
         const msg = sock.readSmallMessage() catch |err| {
-            std.log.err("client disconnect: {s} {}", .{ sock.key, err });
+            if (!req.broker.stop.load(.acquire)) {
+                std.log.debug("client disconnect: {s} {}", .{ sock.key, err });
+            }
+            req.ws_running.store(false, .release);
             return;
         };
         if (msg.data.len == 0) continue;
         if (msg.opcode == .connection_close) {
-            req.ws_running = false;
+            req.ws_running.store(false, .release);
             return;
         }
         std.log.info("WebSocket msg: {} {s}", .{ msg.opcode, msg.data });
@@ -144,10 +158,14 @@ fn handleApi(req: *Request) !bool {
                 .shutdown => {
                     log.info("api: {s}", .{message_str});
                     try req.http.respond("ok", .{});
-                    std.process.exit(0);
+                    if (req.on_shutdown) |cb| {
+                        cb(req.shutdown_ctx);
+                    } else {
+                        req.broker.requestStop(req.io);
+                    }
+                    return true;
                 },
                 .none => {},
-                // else => return error.MessageNotImplemented,
             }
         }
     }
@@ -322,7 +340,7 @@ fn handleDir(req: *Request, path: []const u8) !void {
     const ts = std.Io.Clock.real.now(req.io);
     log.info("{d}: {s}", .{ ts.toSeconds(), path });
 
-    const dir = req.public_dir.openDir(req.io, path, .{
+    var dir = req.public_dir.openDir(req.io, path, .{
         .iterate = true,
     }) catch |err| switch (err) {
         error.FileNotFound => {
@@ -331,6 +349,7 @@ fn handleDir(req: *Request, path: []const u8) !void {
         },
         else => return err,
     };
+    defer dir.close(req.io);
 
     var iter = dir.iterate();
 

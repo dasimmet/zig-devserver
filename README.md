@@ -1,29 +1,58 @@
 # Zig Dev Http Webserver
 
-a webserver that reloads the page when `zig build dev --watch` rebuilds your content
+A lightweight HTTP/WebSocket development server for Zig 0.17.1+ that watches a served directory in-process and reloads connected browser tabs when files change.
 
-try it with:
+> [!IMPORTANT]
+> **Serving compiled / installed build outputs (`zig-out`):**
+> When `zig build dev` runs `devserver` (`Run.stdio = .protocol`), Zig's build runner blocks waiting on the server step and does **not** re-run upstream build or install steps while the server is alive.
+>
+> If you want **output prefix watching** (rebuilding your project into `zig-out` on source changes and having `devserver` reload the browser), start `zig build --watch` **in parallel** with the devserver:
+>
+> ```sh
+> # Terminal 1: continuously rebuild & install outputs into zig-out
+> zig build --watch
+>
+> # Terminal 2: serve the output directory and live-reload browsers on changes
+> zig build dev -Dopen-browser=index.html
+> ```
+>
+> Or in a single shell session:
+>
+> ```sh
+> zig build --watch &
+> zig build dev -Dopen-browser=index.html
+> ```
+>
+> If you are only serving a static source directory directly (without needing rebuilds), running `zig build run-lazypath-src`, `zig build run-lazypath-option -Dserve-dir=<path>`, or `./zig-out/bin/devserver watch <host> <port> <directory>` by itself is sufficient.
 
+## How It Works
+
+* **In-Process Directory Watching**: `devserver` monitors the served directory tree directly (skipping `.git` and `.zig-cache`, with debouncing) and logs all watched directories/files on setup as well as added/modified/removed entries on change events to `stderr`.
+* **Live Browser Reload**: HTML pages are injected with a small script that connects over WebSocket to `/__zig_devserver_api`. Whenever watched files change, the server pushes a newer `start_time` timestamp and the browser tab reloads.
+* **Port Takeover & Clean Shutdown**: Starting a new `watch` instance on an already-bound fixed port sends a `POST /__zig_devserver_api` shutdown request (`{"action":"shutdown"}`) to the previous instance to take over the port cleanly.
+* **`Run.stdio = .protocol` Integration**: `build.zig` `Run` steps use `run.stdio = .protocol;` (no `fork()` or `PPID` polling). All build server protocol messages are logged to `stderr`, while interactive server status logs are written to `/dev/tty` when available.
+
+Naturally, **DO NOT USE THIS IN PRODUCTION**. This is a development tool only.
+
+## CLI Usage
+
+```sh
+devserver watch <host> <port> <directory>   # Serve files and watch for changes
+devserver help                              # Show usage (-h, --help)
 ```
-zig build dev --watch -Dwatch -Dopen-browser=index.html
+
+When invoked with `--listen=-` (by Zig's `Run.stdio = .protocol`), `devserver` always runs the watcher for both `watch <host> <port> <directory>` and `<host> <port> <directory>`. The legacy `serve` command has been removed.
+
+You can also run the server binary through `build.zig`:
+
+```sh
+zig build dev -Dport=8080 -Dopen-browser=index.html
+zig build run-lazypath-option -Dserve-dir=path/to/dir -Dport=8080
+zig build run-with-args -- 127.0.0.1 8080 path/to/dir
+zig build test
 ```
 
-and then edit `src/index.html` and have the browser tab reload.
-
-Only POSIX is supported, since reloading requires `fork()` ing the server
-to the background at the moment.
-
-The next launch of the server will send a request to the old instance to kill it.
-
-On html pages a small javascript is injected to check when the server was started.
-When the page receives a newer timestamp, a reload is triggered.
-
-To stop the forked server when `zig build dev --watch` is stopped,
-it sends `kill(ppid, 0)` signals back to it's parent process on request and end itself if needed.
-
-Naturally, DO NOT USE THIS IN PRODUCTION. This is a development tool only.
-
-## `build.zig` usage
+## `build.zig` Usage
 
 ```zig
 // zig fetch --save git+https://github.com/dasimmet/zig-devserver.git
@@ -31,30 +60,27 @@ Naturally, DO NOT USE THIS IN PRODUCTION. This is a development tool only.
 pub fn build(b: *std.Build) void {
     const devserver = @import("devserver");
     const run_devserver = devserver.serveDir(b, .{
-        // optionally provide a host ip. this is the default:
+        // optionally provide a host ip (default: "127.0.0.1"):
         .host = "127.0.0.1",
 
-        // provide a port to listen on
+        // provide a port to listen on (0 picks an ephemeral port):
         .port = b.option(u16, "port", "dev server port") orelse 8080,
 
-        // enable rebuild and restart on changes.
-        // setting this to true only works with "zig build --watch"
-        .watch = true,
-
-        // optionally provide a path to open
+        // optionally provide a path to open in the default browser on startup:
         .open_browser = b.option(
             []const u8,
             "open-browser",
-            "open the os default webbbrowser on first server launch",
-        ) orelse "/",
+            "open the os default webbrowser on first server launch",
+        ),
 
-        // either `serveInstall` => path in `zig-out`.
-        // makes the run step depend on the install step.
-        // alternatively, use `serveLazyPath` on sources or generated files
+        // either `.serveInstall("www")` => path in `zig-out` (depends on install step),
+        // or `.serveLazyPath(...)` on source or generated directories:
         .directory = .serveInstall("www"),
     });
 
-    // setup a `dev` top level step to run the server
+    // Set up a `dev` top-level step to run the server.
+    // To rebuild `zig-out` on source edits while serving, run `zig build --watch`
+    // in parallel with `zig build dev`.
     b.step("dev", "run dev webserver").dependOn(&run_devserver.step);
 }
 ```
