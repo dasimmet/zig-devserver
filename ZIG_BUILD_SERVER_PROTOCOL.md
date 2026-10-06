@@ -179,10 +179,18 @@ Rather than running `devserver` as an external standalone CLI tool, we preserve 
                       └── On step completion -> `devserver` triggers browser reload
 ```
 
-### Why This Works & Avoids Recursion
-1. **No Infinite Recursion**: Under `--listen=-`, the inner `zig build` **never executes any steps on startup**. It waits for the client to send `bsp_build_steps`. `devserver` explicitly requests the `install` step (or static asset step) and **omits the `dev` step**.
-2. **No Cache Conflicts**: Zig 0.17.0 locks `.zig-cache` on a fine-grained, per-manifest basis. The outer and inner builds share the cache safely, and artifacts built by the outer build are instant cache hits for the inner build.
-3. **No Process Detachment**: `devserver` stays in the foreground of the outer build step. Pressing `Ctrl+C` terminates both the outer runner and the inner build cleanly.
+### Why This Works & Avoids Recursion (Without Any Custom Options)
+1. **No Infinite Recursion Without Any Options**: Under `--listen=-`, passing step names on the CLI is explicitly rejected by the Zig build runner:
+   ```text
+   error: build steps must be provided over the protocol instead of using CLI arguments
+   ```
+   Because steps cannot be passed via CLI in listen mode, the inner `zig build` **never executes any steps on startup**. It accepts all build configuration arguments (`-D...`, target/optimize flags) as-is, constructs the DAG, and then pauses waiting for protocol instructions over `stdin`. `devserver` explicitly requests the `install` step (or target asset step) via `bsp_build_steps` and **omits the `dev` step**. No synthetic flags or `-D` options are needed to suppress `dev`.
+2. **Arguments Reflected As-Is**: All user-provided build options from the outer build are passed verbatim to the inner build:
+   - `build.zig` collects all user `-D` options via `b.user_input_options` and forwards them to `devserver_run`.
+   - `devserver` invokes `<zig_exe> build <user_options...> --listen=-`.
+   - The inner build receives the exact same configuration environment as the outer build.
+3. **No Cache Conflicts**: Zig 0.17.0 locks `.zig-cache` on a fine-grained, per-manifest basis. The outer and inner builds share the cache safely, and artifacts built by the outer build are instant cache hits for the inner build.
+4. **No Process Detachment**: `devserver` stays in the foreground of the outer build step. Pressing `Ctrl+C` terminates both the outer runner and the inner build cleanly.
 
 ---
 
@@ -190,7 +198,7 @@ Rather than running `devserver` as an external standalone CLI tool, we preserve 
 
 Below is the step-by-step engineering plan to migrate `zig-devserver` to this architecture.
 
-### Phase 1: `build.zig` Updates
+### Phase 1: `build.zig` Updates & Argument Reflection
 1. **Pass `zig_exe` to the Devserver Step**:
    Pass the path of the compiler executing the current build to the devserver executable:
    ```zig
@@ -199,20 +207,39 @@ Below is the step-by-step engineering plan to migrate `zig-devserver` to this ar
    // Pass the zig executable path:
    devserver_run.addFileArg(.{ .relative = .{ .base = .zig_exe } });
    ```
-2. **Pass Configuration Arguments**:
+2. **Reflect User Build Options As-Is**:
+   Inspect `b.user_input_options` in `build.zig` so all `-D` arguments passed to the outer build are automatically forwarded to `devserver` for re-execution in the inner build:
+   ```zig
+   // Forward all user-specified -D flags as-is:
+   for (b.user_input_options.keys()) |name| {
+       const user_opt = b.user_input_options.get(name).?;
+       switch (user_opt) {
+           .flag => devserver_run.addArg(b.fmt("-D{s}", .{name})),
+           .scalar => |s| devserver_run.addArg(b.fmt("-D{s}={s}", .{ name, s })),
+           .list => |list| for (list) |item| {
+               devserver_run.addArg(b.fmt("-D{s}={s}", .{ name, item }));
+           },
+           else => {},
+       }
+   }
+   // Forward any passthrough arguments passed after '--':
+   devserver_run.addPassthruArgs();
+   ```
+3. **Pass Server Configuration Arguments**:
    Add host, port, and directory arguments:
    ```zig
    devserver_run.addArg(opt.host);
    devserver_run.addArg(b.fmt("{d}", .{opt.port}));
    // directory arg...
    ```
-3. **Keep `dev` Step Independent**:
+4. **Keep `dev` Step Independent**:
    Ensure `b.step("dev", "run the dev server")` depends on `devserver_run.step`, while the standard `install` step builds the actual web application assets.
 
 ### Phase 2: Create BSP Client (`src/BspClient.zig`)
 Create a dedicated module in `src/BspClient.zig` responsible for managing the inner `zig build` subprocess:
 
 1. **Process Spawning**:
+   Spawn `zig build` reflecting the user's build options as-is with `--listen=-`:
    ```zig
    pub const BspClient = struct {
        child: std.process.Child,
@@ -220,9 +247,20 @@ Create a dedicated module in `src/BspClient.zig` responsible for managing the in
        out_writer: std.Io.Writer,
        config_path: ?[]const u8 = null,
 
-       pub fn spawn(io: std.Io, gpa: std.mem.Allocator, zig_exe: []const u8) !BspClient {
+       pub fn spawn(
+           io: std.Io,
+           gpa: std.mem.Allocator,
+           zig_exe: []const u8,
+           reflected_args: []const []const u8,
+       ) !BspClient {
+           var argv = std.ArrayList([]const u8).empty;
+           try argv.append(gpa, zig_exe);
+           try argv.append(gpa, "build");
+           try argv.appendSlice(gpa, reflected_args);
+           try argv.append(gpa, "--listen=-");
+
            var child = std.process.spawn(io, .{
-               .argv = &.{ zig_exe, "build", "--listen=-" },
+               .argv = argv.items,
                .stdin = .pipe,
                .stdout = .pipe,
                .stderr = .inherit,
