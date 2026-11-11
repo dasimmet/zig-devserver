@@ -52,15 +52,7 @@ pub fn build(b: *std.Build) void {
 
     const run = b.addRunArtifact(exe);
     run.has_side_effects = true;
-    const maybe_ppid: ?[]const u8 = switch (@import("builtin").os.tag) {
-        .linux, .macos => b.fmt("{d}", .{std.os.linux.getpid()}),
-        // TODO: figure out processes on windows
-        // .windows => b.fmt("{d}", .{std.os.windows.GetCurrentProcessId()}),
-        else => null,
-    };
-    if (maybe_ppid) |ppid| {
-        run.setEnvironmentVariable("PPID", ppid);
-    }
+    run.stdio = .protocol;
     if (@hasField(@TypeOf(b.*), "args")) {
         if (b.args) |args| {
             run.addArgs(args);
@@ -69,6 +61,12 @@ pub fn build(b: *std.Build) void {
         run.addPassthruArgs();
     }
     b.step("run-with-args", "run the server binary with arguments").dependOn(&run.step);
+
+    const exe_unit_tests = b.addTest(.{
+        .root_module = exe.root_module,
+    });
+    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
+    b.step("test", "Run unit and server integration tests").dependOn(&run_exe_unit_tests.step);
 
     const install_html = b.addInstallFile(b.path("src/static/devserver-index.html"), "www/index.html");
     b.getInstallStep().dependOn(&install_html.step);
@@ -126,14 +124,7 @@ pub fn build(b: *std.Build) void {
 pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Run {
     const run = b.addRunArtifact(server);
     run.has_side_effects = true;
-    const maybe_ppid: ?[]const u8 = switch (@import("builtin").os.tag) {
-        .linux, .macos => b.fmt("{d}", .{std.os.linux.getpid()}),
-        else => null,
-    };
-    if (maybe_ppid) |ppid| {
-        run.setEnvironmentVariable("PPID", ppid);
-    }
-    const watch = opt.watch orelse false;
+    run.stdio = .protocol;
     // if (opt.watch == null) {
     //     // TODO: find a better way to determine we are running zig build in
     //     // watch mode.
@@ -154,7 +145,7 @@ pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Ru
     //     }
     // }
 
-    run.addArg(if (watch) "watch" else "serve");
+    run.addArg("watch");
     run.addArg(opt.host);
     run.addArg(b.fmt("{d}", .{opt.port}));
     switch (opt.directory) {
@@ -173,7 +164,7 @@ pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Ru
             }
             run.step.dependOn(b.getInstallStep());
         },
-        .lazypath => |lp| run.addFileArg(lp),
+        .lazypath => |lp| run.addDirectoryArg(lp),
     }
     if (opt.open_browser) |path| run.setEnvironmentVariable("ZIG_DEVSERVER_OPEN_BROWSER", path);
     return run;

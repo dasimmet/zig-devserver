@@ -157,174 +157,92 @@ Relevant source files:
 
 ---
 
-## 5. Architectural Pattern: The Outer/Inner Supervisor Model
+## 5. `Run.stdio = .protocol` vs. `--listen=-` BSP in `zig-devserver`
 
-Rather than running `devserver` as an external standalone CLI tool, we preserve the standard `zig build dev` entry point using an **Outer/Inner Supervisor Pattern**:
+Zig 0.17.0 introduced `Run.stdio = .protocol` (`std.Build.Step.Run.StdIo.protocol`), which lets a build-graph `Run` step speak Zig's `stdin`/`stdout` binary test-runner protocol (`std.zig.Client` in `Maker` <-> `std.zig.Server` in the child) instead of inheriting stdio or receiving plain filesystem paths on `argv`. Because `b.args` and `fork()`-based daemonization no longer work for `zig build dev` under Zig 0.17+, `zig-devserver` adopts **`Run.stdio = .protocol` with in-process directory watching**.
+
+### How `Run.stdio = .protocol` Works in Zig 0.17.0 / 0.17.1
+
+When a `Run` step sets `run.stdio = .protocol`:
 
 ```
 [ Developer Terminal ]
        │
-       ▼ runs: `zig build dev`
-[ Outer zig build ]
+       ▼ runs: `zig build dev` / `zig build run-with-args -- ...`
+[ Zig Maker (`lib/compiler/Maker.zig` + `Maker/Step/Run.zig`) ]
+       │  Spawns `devserver --listen=-` with piped stdin/stdout/stderr
+       │  Inherits `LazyPath` directories as open OS handles (`inherit_dirs`)
        │
-       └── Executes Run step: `devserver` (has_side_effects = true, foreground)
-             │
-             ├── 1. Starts HTTP server (serves static files, SSE/WebSocket reload broker)
-             │
-             └── 2. Spawns Child: `<zig_exe> build --listen=-` (Inner Build)
-                      │
-                      ├── BSP Handshake & Configuration exchange
-                      ├── `devserver` requests build steps with `flags.watch = true`
-                      ├── Inner zig build performs native incremental compilation & file watching
-                      └── On step completion -> `devserver` triggers browser reload
+       ├──► stdin  (`Client.Message`): `.args` (string/prefix/handle/suffix), `.query_test_metadata`, `.run_test(0)`
+       ◄──  stdout (`Server.Message`): `.zig_version`, `.test_metadata`, `.test_started`, ... `.test_results`
+       └──► stdin  (`.exit` after `.test_results`)
+       │
+[ Foreground `devserver` Process ]
+       ├── Decodes `Client.Message.Arg` (`.string`, `.input_dir` handles, etc.)
+       ├── Serves HTTP + `/__zig_devserver_api` + WebSocket live-reload notifications
+       ├── Runs in-process directory polling (`Watcher.zig`) with debounce + futex `Broker`
+       └── Logs all protocol messages to `stderr` and interactive app info/warnings to `/dev/tty` (errors to both)
 ```
 
-### Why This Works & Avoids Recursion (Without Any Custom Options)
-1. **No Infinite Recursion Without Any Options**: Under `--listen=-`, passing step names on the CLI is explicitly rejected by the Zig build runner:
-   ```text
-   error: build steps must be provided over the protocol instead of using CLI arguments
-   ```
-   Because steps cannot be passed via CLI in listen mode, the inner `zig build` **never executes any steps on startup**. It accepts all build configuration arguments (`-D...`, target/optimize flags) as-is, constructs the DAG, and then pauses waiting for protocol instructions over `stdin`. `devserver` explicitly requests the `install` step (or target asset step) via `bsp_build_steps` and **omits the `dev` step**. No synthetic flags or `-D` options are needed to suppress `dev`.
-2. **Arguments Reflected As-Is**: All user-provided build options from the outer build are passed verbatim to the inner build:
-   - `build.zig` collects all user `-D` options via `b.user_input_options` and forwards them to `devserver_run`.
-   - `devserver` invokes `<zig_exe> build <user_options...> --listen=-`.
-   - The inner build receives the exact same configuration environment as the outer build.
-3. **No Cache Conflicts**: Zig 0.17.0 locks `.zig-cache` on a fine-grained, per-manifest basis. The outer and inner builds share the cache safely, and artifacts built by the outer build are instant cache hits for the inner build.
-4. **No Process Detachment**: `devserver` stays in the foreground of the outer build step. Pressing `Ctrl+C` terminates both the outer runner and the inner build cleanly.
+1. **Test-Runner Handshake & Timeout Behavior**:
+   * `Maker` spawns the step with `--listen=-` and piped `stdin`/`stdout`/`stderr`.
+   * If `run` has arguments past `argv[0]`, `Maker` encodes them into a single `Client.Message.Tag.args` packet (`string`, `prefix`, `input_dir`, `input_file`, `input_file_content`, `output_dir`, `output_file`, `suffix`), passing open `Io.Dir.Handle` / `Io.File.Handle` values natively for `LazyPath` arguments such as `addDirectoryArg(lp)`.
+   * `Maker` then sends `.query_test_metadata` followed by `.run_test`. Once the server responds with `.test_started`, `Maker` clears its 60-second `response_timeout` and waits indefinitely while the server runs (unless `--unit-test-timeout` is specified on `zig build`).
+   * On clean shutdown (e.g. `POST /__zig_devserver_api` with `{"action":"shutdown"}`), the server stops accepting connections, joins worker/watcher threads, sends `.test_results` (`.pass`), waits for `Maker`'s `.exit` frame on `stdin`, and exits with code `0`.
+
+2. **Observed Constraints of `Run.stdio = .protocol` (`0.17.0` & `0.17.1`)**:
+   * **Foreground blocking, no upstream graph rebuilds while serving**: While `devserver` is running inside `evalZigTest`/`waitZigTest`, `Maker` blocks waiting on the child step and does not re-evaluate upstream `Compile`, `InstallFile`, or `WriteFiles` steps in the build graph.
+   * **`discovered_inputs` direction**: The `.discovered_inputs` message goes *child -> `Maker`* for manifest/cache tracking of future builds, not *`Maker` -> child*. Because `Maker` only updates its watch list after the `Run` step completes, exiting inside `devserver` on file edits does not trigger an automatic respawn under `zig build --watch`.
+   * **Single `stdin` reader & reserved stdio**: Writing plain text to `stdout` corrupts binary IPC framing; writing non-error logs to `stderr` triggers `Maker`'s buffered `"stderr"` summary in Zig 0.17.1. Furthermore, only one thread may read `session.server.in` (`stdin`) at a time while serving.
+
+### When `--listen=-` BSP Supervisor Would Be Required Instead
+
+Use an outer/inner `--listen=-` BSP client (`bsp_configuration` / `bsp_build_steps` with `watch = true` / `bsp_step_completed`, documented in Sections 2–4) instead of pure `Run.stdio = .protocol` + in-process directory watching if `zig-devserver` later needs to serve **compiled or generated assets** (such as a Zig WASM binary or bundled frontend assets) and automatically re-run upstream `std.Build` steps on source edits without restarting `devserver`. For serving static/pre-built directories (`serveDir` and `serveLazyPath`), `Run.stdio = .protocol` plus in-process directory watching avoids nested `zig build` recursion and option-reflection complexity cleanly.
 
 ---
 
-## 6. Detailed Implementation Plan for `zig-devserver`
+## 6. Implemented `Run.stdio = .protocol` Architecture
 
-Below is the step-by-step engineering plan to migrate `zig-devserver` to this architecture.
+### Phase 1: `build.zig` Updates
+1. **Enable `.protocol` Stdio on Server `Run` Steps**:
+   * Keep `run.stdio = .protocol;` on the `"run-with-args"` step and set `run.stdio = .protocol;` inside `serveDirInternal`, always invoking the `"watch"` command without branching to `"serve"`.
+   * Use `run.addDirectoryArg(lp)` (instead of `addFileArg(lp)`) for `.lazypath` directories so `Maker` opens the directory handle with `.iterate = true` and passes `Client.Message.Arg.input_dir`.
+   * Remove legacy `PPID` environment variable propagation across Linux/macOS/Windows.
+2. **Add `test` Top-Level Step**:
+   * Expose `zig build test` running unit and HTTP integration tests on `exe.root_module`.
 
-### Phase 1: `build.zig` Updates & Argument Reflection
-1. **Pass `zig_exe` to the Devserver Step**:
-   Pass the path of the compiler executing the current build to the devserver executable:
-   ```zig
-   const devserver_run = b.addRunArtifact(devserver_exe);
-   devserver_run.has_side_effects = true;
-   // Pass the zig executable path:
-   devserver_run.addFileArg(.{ .relative = .{ .base = .zig_exe } });
-   ```
-2. **Reflect User Build Options As-Is**:
-   Inspect `b.user_input_options` in `build.zig` so all `-D` arguments passed to the outer build are automatically forwarded to `devserver` for re-execution in the inner build:
-   ```zig
-   // Forward all user-specified -D flags as-is:
-   for (b.user_input_options.keys()) |name| {
-       const user_opt = b.user_input_options.get(name).?;
-       switch (user_opt) {
-           .flag => devserver_run.addArg(b.fmt("-D{s}", .{name})),
-           .scalar => |s| devserver_run.addArg(b.fmt("-D{s}={s}", .{ name, s })),
-           .list => |list| for (list) |item| {
-               devserver_run.addArg(b.fmt("-D{s}={s}", .{ name, item }));
-           },
-           else => {},
-       }
-   }
-   // Forward any passthrough arguments passed after '--':
-   devserver_run.addPassthruArgs();
-   ```
-3. **Pass Server Configuration Arguments**:
-   Add host, port, and directory arguments:
-   ```zig
-   devserver_run.addArg(opt.host);
-   devserver_run.addArg(b.fmt("{d}", .{opt.port}));
-   // directory arg...
-   ```
-4. **Keep `dev` Step Independent**:
-   Ensure `b.step("dev", "run the dev server")` depends on `devserver_run.step`, while the standard `install` step builds the actual web application assets.
+### Phase 2: Protocol Session & Argument Decoder (`src/Protocol.zig`)
+* **`Arg` & `decodeArgs`**: Decodes `Client.Message.Tag.args` payloads into typed `Arg` variants (`.string`, `.input_dir`, `.input_file`, `.output_dir`, `.output_file`) supporting `.prefix` and `.suffix` modifiers and validated tag ordering.
+* **`Session`**: Implements `std.zig.Server` messaging over `stdin`/`stdout` and logs all incoming and outgoing build server protocol messages (`protocol: -> ...` / `protocol: <- ...`, including decoded `args`, `test_index`, status, EOF, and unsupported tags) thread-safely to `stderr` via `std.debug.lockStderr` (with `initWithLogWriter` for unit tests):
+  * `handshake()`: Sends `.zig_version`, decodes `.args`, replies to `.query_test_metadata` with a single synthetic `"devserver"` entry, and responds `.test_started` upon `.run_test`.
+  * `sendTestResults()`: Sends `.test_results` (`.pass`/`.fail`) and logs the outgoing result frame to `stderr`.
+  * `waitForCloseOrExit()`: Runs on a dedicated single-reader `ControlContext` thread while the server runs so if `Maker` closes `stdin` or sends `.exit`, the server logs the control message/EOF and initiates graceful shutdown without concurrent `stdin` reads.
+  * `finish()`: Used for early non-serving exits (`help`, argument errors, startup failures) before the control thread starts, emitting `.test_results` via `sendTestResults()` and draining until `.exit`/EOF.
 
-### Phase 2: Create BSP Client (`src/BspClient.zig`)
-Create a dedicated module in `src/BspClient.zig` responsible for managing the inner `zig build` subprocess:
+### Phase 3: In-Process Directory Watcher & Broker (`src/Watcher.zig`)
+* **`Broker`**: Thread-safe reload coordinator storing strictly monotonically increasing positive `reload_time_ms: std.atomic.Value(i64)` (fixing JS `res.start_time > 0` checks and avoiding nanosecond `MAX_SAFE_INTEGER` precision overflow), `seq: std.atomic.Value(u32)`, and `stop: std.atomic.Value(bool)`. Uses `io.futexWaitTimeout` / `io.futexWake` for zero-spin instant WebSocket wakeups and immediate shutdown notification.
+* **`computeSnapshot` & `runLoop`**: Walks the served `Io.Dir` (reopened via `.openDir(io, ".", .{ .iterate = true })`), skipping `.git` and `.zig-cache` and capping scans at `50_000` entries, XOR-hashing path, entry kind, size, and `mtime_ns` into an order-independent `Wyhash` digest. Polls every 250ms with 50ms settle debouncing before bumping `Broker`.
 
-1. **Process Spawning**:
-   Spawn `zig build` reflecting the user's build options as-is with `--listen=-`:
-   ```zig
-   pub const BspClient = struct {
-       child: std.process.Child,
-       in_reader: std.Io.Reader,
-       out_writer: std.Io.Writer,
-       config_path: ?[]const u8 = null,
-
-       pub fn spawn(
-           io: std.Io,
-           gpa: std.mem.Allocator,
-           zig_exe: []const u8,
-           reflected_args: []const []const u8,
-       ) !BspClient {
-           var argv = std.ArrayList([]const u8).empty;
-           try argv.append(gpa, zig_exe);
-           try argv.append(gpa, "build");
-           try argv.appendSlice(gpa, reflected_args);
-           try argv.append(gpa, "--listen=-");
-
-           var child = std.process.spawn(io, .{
-               .argv = argv.items,
-               .stdin = .pipe,
-               .stdout = .pipe,
-               .stderr = .inherit,
-           }) catch |err| return err;
-           // setup readers/writers...
-       }
-   };
-   ```
-2. **Message Reading & Writing**:
-   Implement wire-framing helpers using little-endian headers:
-   * `receiveHeader() !std.zig.Server.Message.Header`
-   * `readHandshake() !std.zig.Server.Message.Handshake`
-   * `sendBuildSteps(step_indices: []const u32, watch: bool) !void`
-   * `sendExit() !void`
-3. **Configuration Parsing**:
-   Upon receiving `bsp_configuration`, read the payload path and parse the graph with `std.Build.Configuration.loadFile(arena, io, file)`.
-   * Find the step index named `"install"` (or default step `config.default_step`).
-   * Send `bsp_build_steps` containing this index with `flags.watch = true`.
-4. **Event Dispatch Loop**:
-   Run an event loop (or async task) reading incoming server messages:
-   * When `bsp_step_completed` has `status == .success` for target assets, notify the reload broker.
-   * If `status == .failure`, log a compilation error to stderr.
-
-### Phase 3: Signal Handling & Graceful Teardown
-1. **Capture Termination Signals**:
-   Ensure `SIGINT` (Ctrl+C) and `SIGTERM` are caught in `main.zig`.
-2. **Clean Child Termination**:
-   When stopping:
-   * Send the BSP `exit` message (`tag = 0x00000000`, `bytes_len = 0`) over stdin.
-   * Close `child.stdin`.
-   * Wait for child process termination with `child.wait(io)` to avoid leaving orphaned background compiler processes.
-
-### Phase 4: HTTP Server & Browser Live-Reload
-1. **Live-Reload Endpoint**:
-   Expose an SSE (`/devserver-events`) or WebSocket endpoint in `src/main.zig`.
-2. **Browser Client Script**:
-   Inject (or serve from `src/static/devserver-index.html`) a lightweight client script:
-   ```javascript
-   const evtSource = new EventSource("/devserver-events");
-   evtSource.onmessage = (event) => {
-       if (event.data === "reload") location.reload();
-   };
-   ```
-3. **Triggering the Reload**:
-   When `BspClient` signals that a rebuild completed successfully, broadcast `"reload"` to all connected SSE clients.
-
-### Phase 5: Codebase Cleanup
-1. **Remove Broken Legacy Code**:
-   * Delete `watchServer` and all calls to `std.os.linux.fork()`.
-   * Delete `notifyServer` and socket polling loops.
-   * Remove `PPID` environment variable passing and checks.
-   * Remove the syntax typo at `src/main.zig:14` (`std.Build.Watch.`).
-2. **Fix `std.Io` Streaming Buffers**:
-   Update `usage()` and `stdout` printing in `src/main.zig` to use proper `writerStreaming` / `std.debug.print` patterns compatible with Zig 0.17.0.
+### Phase 4: HTTP / WebSocket Server & Teardown (`src/Request.zig`, `src/main.zig`)
+* **`Request.zig`**:
+  * Replaces `start_time: Io.Timestamp` with `broker: *Watcher.Broker` and optional `on_shutdown` callback (`ShutdownCoord.trigger`).
+  * Pushes `broker.currentReloadTime()` (epoch milliseconds) over WebSocket whenever `broker.waitForChange` wakes on edit or shutdown, and shuts down the socket + joins `recv_thread` cleanly on teardown.
+  * Ensures opened directories in `handleDir` are closed via `defer dir.close(req.io);`.
+* **`main.zig`**:
+  * Removes the legacy `serve` command; `watch` (plus `help`/`-h`/`--help`) is the sole server command, and when `--listen=-` is provided, both explicit `watch <host> <port> <directory>` and implicit `<host> <port> <directory>` run the in-process watcher automatically.
+  * Dispatches unified `CmdArg` slices identically from CLI `argv` or `--listen=-` `Protocol.Session` (opening `.string` paths or `.input_dir` handles with `.iterate = true` and resolving canonical `public_path` via `realPathFileAlloc`).
+  * Installs `customLogFn`: in `.protocol` mode, routes interactive application logs (`info`/`warn`/`debug`) to `/dev/tty` when available without touching `stdout`/`stderr`, while forwarding `.err` messages (alongside `Protocol.zig`'s direct `stderr` protocol message logs) to `stderr`.
+  * Supports ephemeral port `0` (`tcp_server.socket.address`), safe watch-mode fixed-port takeover on `AddressInUse` via `POST /__zig_devserver_api`, tracked HTTP worker teardown (`WorkerTracker`), watcher + control thread joins, and clean `.test_results` (`Session.sendTestResults`) / `.exit` completion before returning exit code `0`.
 
 ---
 
 ## 7. Verification & Testing Checklist
 
-- [ ] **Initial Launch**: Run `zig build dev`. Verify the server starts, serves the index page, and displays the banner.
-- [ ] **Incremental File Watch**: Modify an HTML or Zig source file. Verify the inner build triggers recompilation, prints progress, and emits `bsp_step_completed`.
-- [ ] **Live Reload**: Verify open browser tabs refresh automatically without manual user action.
-- [ ] **Error Resilience**: Introduce a syntax error in source files. Verify the inner build reports the error without crashing `devserver`. Fix the error and verify it recovers and reloads.
-- [ ] **Clean Exit**: Press `Ctrl+C`. Verify that both the devserver and the inner `zig build` exit cleanly without leaving dangling processes or locked `.zig-cache` files.
+- [x] **Unit & Integration Tests (`zig build test`)**: Verified `Protocol.zig` arg decoding, handshake/finish round-trip, protocol message logging (including unsupported BSP tags and EOF), `Watcher.zig` snapshot/broker tests, `main.zig` command parsing (`serve` removed, `--listen=-` implicit/explicit `watch`), HTTP directory listing, HTML JS injection, `fromProtocolArgs`, and API shutdown integration tests (`Build Summary: 3/3 steps succeeded; 10/10 tests passed`).
+- [x] **Executable Build (`zig build`)**: Verified `zig build` builds the `devserver` artifact cleanly on Zig 0.17.1 (`Build Summary: 4/4 steps succeeded`).
+- [x] **Protocol Help, Implicit Watch, Removed `serve` & `stderr` Logging (`zig build run-with-args`)**: Verified `.protocol` handles `help` (exit `0`), `<host> <port> <dir>` without explicit `"watch"`, rejects `serve` cleanly (`error: unknown command 'serve' (use 'watch' instead)`), and logs all build server protocol messages (`protocol: -> zig_version`, `<- args`, `<- query_test_metadata`, `-> test_metadata`, `<- run_test`, `-> test_started`, `-> test_results`, `<- exit`) to `stderr`.
+- [x] **Live Serving & In-Process Reload (`zig build dev`, `run-lazypath-wf`, `run-lazypath-option`)**: Started servers under `Run.stdio = .protocol`, verified HTTP responses, injected reload script, `WriteFiles` directory handle serving, `stderr` protocol message logging (including `input_dir` handles), live WebSocket `start_time` reload bump on file edit (`1794422544702 -> 1794422545003`), and clean `/__zig_devserver_api` shutdown & exit.
+- [x] **Direct CLI Mode**: Verified `./zig-out/bin/devserver` supports `help` (exit `0`) and `watch` (without emitting `--listen=-` `protocol:` trace lines), and rejects `serve` (exit `1`).
 
 ---
 
