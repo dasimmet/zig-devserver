@@ -47,6 +47,8 @@ You can also run the server binary through `build.zig`:
 
 ```sh
 zig build dev -Dport=8080 -Dopen-browser=index.html
+zig build run-lazypath-src -Dport=8080
+zig build run-lazypath-wf -Dport=8080
 zig build run-lazypath-option -Dserve-dir=path/to/dir -Dport=8080
 zig build run-with-args -- 127.0.0.1 8080 path/to/dir
 zig build test
@@ -55,7 +57,7 @@ zig build test
 ## `build.zig` Usage
 
 ```zig
-// zig fetch --save git+https://github.com/dasimmet/zig-devserver.git
+// zig fetch --save=devserver git+https://github.com/dasimmet/zig-devserver.git
 
 pub fn build(b: *std.Build) void {
     const devserver = @import("devserver");
@@ -87,8 +89,8 @@ pub fn build(b: *std.Build) void {
 
 ## References
 
+- <https://ziglang.org/download/0.17.0/release-notes.html#Build-Server-Protocol>
 - <https://cookbook.ziglang.cc/05-02-http-post.html>
 - <https://github.com/andrewrk/mime.git>
 - <https://github.com/scottredig/zig-demo-webserver>
-- <https://stackoverflow.com/questions/3043978/how-to-check-if-a-process-id-pid-exists>
 - <https://ziggit.dev/t/build-zig-webserver/7078/4>
