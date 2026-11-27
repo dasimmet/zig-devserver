@@ -71,7 +71,7 @@ pub fn build(b: *std.Build) void {
     const install_html = b.addInstallFile(b.path("src/static/devserver-index.html"), "www/index.html");
     b.getInstallStep().dependOn(&install_html.step);
 
-    const port = b.option(u16, "port", "port to listen on") orelse 8080;
+    const port = b.option(u16, "port", "port to listen on (0 = random)") orelse 0;
     const open_browser = b.option([]const u8, "open-browser", "open the browser when server starts");
     {
         const dev = serveDirInternal(b, exe, .{

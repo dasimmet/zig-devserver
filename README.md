@@ -29,7 +29,7 @@ A lightweight HTTP/WebSocket development server for Zig 0.17.1+ that watches a s
 
 * **In-Process Directory Watching**: `devserver` monitors the served directory tree directly (skipping `.git` and `.zig-cache`, with debouncing) and logs all watched directories/files on setup as well as added/modified/removed entries on change events to `stderr`.
 * **Live Browser Reload**: HTML pages are injected with a small script that connects over WebSocket to `/__zig_devserver_api`. Whenever watched files change, the server pushes a newer `start_time` timestamp and the browser tab reloads.
-* **Port Takeover & Clean Shutdown**: Starting a new `watch` instance on an already-bound fixed port sends a `POST /__zig_devserver_api` shutdown request (`{"action":"shutdown"}`) to the previous instance to take over the port cleanly.
+* **Exclusive Port Binding & Clean Shutdown**: The server binds with `reuse_address = false` and does not take over or reuse an already-bound port (failing with `AddressInUse` if the port is already in use). Sending `POST /__zig_devserver_api` with `{"action":"shutdown"}` shuts down the server cleanly.
 * **`Run.stdio = .protocol` Integration**: `build.zig` `Run` steps use `run.stdio = .protocol;` (no `fork()` or `PPID` polling). All build server protocol messages are logged to `stderr`, while interactive server status logs are written to `/dev/tty` when available.
 
 Naturally, **DO NOT USE THIS IN PRODUCTION**. This is a development tool only.
@@ -37,7 +37,7 @@ Naturally, **DO NOT USE THIS IN PRODUCTION**. This is a development tool only.
 ## CLI Usage
 
 ```sh
-devserver watch <host> <port> <directory>   # Serve files and watch for changes
+devserver watch <host> <port> <directory>   # Serve files and watch for changes (use port 0 for a random port)
 devserver help                              # Show usage (-h, --help)
 ```
 
@@ -46,11 +46,11 @@ When invoked with `--listen=-` (by Zig's `Run.stdio = .protocol`), `devserver` a
 You can also run the server binary through `build.zig`:
 
 ```sh
-zig build dev -Dport=8080 -Dopen-browser=index.html
-zig build run-lazypath-src -Dport=8080
-zig build run-lazypath-wf -Dport=8080
-zig build run-lazypath-option -Dserve-dir=path/to/dir -Dport=8080
-zig build run-with-args -- 127.0.0.1 8080 path/to/dir
+zig build dev -Dopen-browser=index.html
+zig build run-lazypath-src
+zig build run-lazypath-wf
+zig build run-lazypath-option -Dserve-dir=path/to/dir
+zig build run-with-args -- 127.0.0.1 0 path/to/dir
 zig build test
 ```
 
@@ -65,8 +65,8 @@ pub fn build(b: *std.Build) void {
         // optionally provide a host ip (default: "127.0.0.1"):
         .host = "127.0.0.1",
 
-        // provide a port to listen on (0 picks an ephemeral port):
-        .port = b.option(u16, "port", "dev server port") orelse 8080,
+        // provide a port to listen on (0 picks a random available port, default):
+        .port = b.option(u16, "port", "dev server port") orelse 0,
 
         // optionally provide a path to open in the default browser on startup:
         .open_browser = b.option(

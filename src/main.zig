@@ -280,54 +280,6 @@ fn connectTargetForAddress(addr: Io.net.IpAddress) Io.net.IpAddress {
     };
 }
 
-fn notifyExistingServer(gpa: std.mem.Allocator, io: Io, target: Io.net.IpAddress) !bool {
-    const stream = target.connect(io, .{ .mode = .stream }) catch return false;
-    defer stream.close(io);
-
-    var send_buf: [512]u8 = undefined;
-    var recv_buf: [1024]u8 = undefined;
-    var writer = stream.writer(io, &send_buf);
-    var reader = stream.reader(io, &recv_buf);
-
-    const payload = "{\"action\":\"shutdown\"}";
-    try writer.interface.print(
-        "POST {s} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
-        .{ Request.Api.endpoint, payload.len, payload },
-    );
-    try writer.interface.flush();
-
-    const resp = reader.interface.allocRemaining(gpa, .limited(4096)) catch return false;
-    defer gpa.free(resp);
-
-    return std.mem.startsWith(u8, resp, "HTTP/1.1 200") or
-        std.mem.startsWith(u8, resp, "HTTP/1.0 200");
-}
-
-fn listenWithWatchTakeover(
-    io: Io,
-    gpa: std.mem.Allocator,
-    address: *const Io.net.IpAddress,
-) !Io.net.Server {
-    return address.listen(io, .{ .reuse_address = true }) catch |err| {
-        if (err != error.AddressInUse or address.getPort() == 0) return err;
-
-        const target = connectTargetForAddress(address.*);
-        const ack = notifyExistingServer(gpa, io, target) catch return err;
-        if (!ack) return err;
-
-        var attempt: usize = 0;
-        while (attempt < 20) : (attempt += 1) {
-            io.sleep(.fromMilliseconds(25), .awake) catch {};
-            if (address.listen(io, .{ .reuse_address = true })) |srv| {
-                return srv;
-            } else |retry_err| {
-                if (retry_err != error.AddressInUse) return retry_err;
-            }
-        }
-        return address.listen(io, .{ .reuse_address = true });
-    };
-}
-
 fn openBrowser(
     gpa: std.mem.Allocator,
     io: Io,
@@ -401,7 +353,7 @@ fn runWatchServer(
     errdefer if (ready_state) |r| r.notifyFailed(io);
 
     const resolved = try Io.net.IpAddress.resolve(io, host, port);
-    var tcp_server = try listenWithWatchTakeover(io, gpa, &resolved);
+    var tcp_server = try resolved.listen(io, .{ .reuse_address = false });
     defer tcp_server.deinit(io);
 
     const bound_address = tcp_server.socket.address;
@@ -909,8 +861,34 @@ test "runWatchServer handles GET HTML injection, directory listing, and POST shu
         try std.testing.expect(std.mem.indexOf(u8, resp, Request.Api.injected_js) != null);
     }
 
-    // 3. Shutdown via API stops both HTTP server and watcher thread.
-    try std.testing.expect(try notifyExistingServer(gpa, io, addr));
+    // 3. Port reuse is disallowed: attempting to bind the same port returns AddressInUse.
+    try std.testing.expectError(error.AddressInUse, addr.listen(io, .{ .reuse_address = false }));
+
+    // 4. Shutdown via API stops both HTTP server and watcher thread.
+    try std.testing.expect(try sendShutdownForTest(gpa, io, addr));
+}
+
+fn sendShutdownForTest(gpa: std.mem.Allocator, io: Io, target: Io.net.IpAddress) !bool {
+    const stream = target.connect(io, .{ .mode = .stream }) catch return false;
+    defer stream.close(io);
+
+    var send_buf: [512]u8 = undefined;
+    var recv_buf: [1024]u8 = undefined;
+    var writer = stream.writer(io, &send_buf);
+    var reader = stream.reader(io, &recv_buf);
+
+    const payload = "{\"action\":\"shutdown\"}";
+    try writer.interface.print(
+        "POST {s} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
+        .{ Request.Api.endpoint, payload.len, payload },
+    );
+    try writer.interface.flush();
+
+    const resp = reader.interface.allocRemaining(gpa, .limited(4096)) catch return false;
+    defer gpa.free(resp);
+
+    return std.mem.startsWith(u8, resp, "HTTP/1.1 200") or
+        std.mem.startsWith(u8, resp, "HTTP/1.0 200");
 }
 
 test "fromProtocolArgs reopens input_dir handles and writes formatted logs" {
