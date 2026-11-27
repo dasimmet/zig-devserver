@@ -14,6 +14,7 @@ io: std.Io,
 gpa: std.mem.Allocator,
 public_dir: std.Io.Dir,
 public_path: []const u8 = "",
+devtools_workspace: ?Api.DevToolsWorkspace = null,
 stream: std.Io.net.Stream,
 broker: *Watcher.Broker,
 on_shutdown: ?*const fn (?*anyopaque) void = null,
@@ -315,25 +316,38 @@ fn handleFile(req: *Request) !void {
 }
 
 fn handleChromeDevTools(req: *Request) !bool {
-    const path = req.http.head.target;
-    if (std.mem.eql(u8, path, "/.well-known/appspecific/com.chrome.devtools.json")) {
-        const ts = std.Io.Clock.real.now(req.io);
-        log.info("{d}: chrome devtools: {s} - {s}", .{ ts.toSeconds(), path, "application/json" });
-        var buf: [8196]u8 = undefined;
-        const res = try std.fmt.bufPrint(&buf, "{f}\n", .{std.json.fmt(.{
-            .workspace = .{
-                .root = req.public_path,
-                .uuid = "6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b",
-            },
-        }, .{
-            .whitespace = .indent_4,
-        })});
-        try req.http.respond(res, .{ .extra_headers = &.{
-            .{ .name = "content-type", .value = "application/json" },
-        } });
+    const raw_target = req.http.head.target;
+    const path = raw_target[0 .. std.mem.indexOfScalar(u8, raw_target, '?') orelse raw_target.len];
+    if (!std.mem.eql(u8, path, Api.devtools_endpoint)) return false;
+
+    // Let an explicit static file in `public_dir` take precedence when present.
+    if (req.public_dir.statFile(req.io, Api.devtools_endpoint[1..], .{})) |stat| {
+        if (stat.kind == .file) return false;
+    } else |_| {}
+
+    const ws = req.devtools_workspace orelse return false;
+
+    if (req.http.head.method != .GET and req.http.head.method != .HEAD) {
+        req.serveError("only GET and HEAD allowed", .method_not_allowed);
         return true;
     }
-    return false;
+
+    const ts = std.Io.Clock.real.now(req.io);
+    log.info("{d}: chrome devtools: {s} -> {s}", .{ ts.toSeconds(), path, ws.root });
+    const res = try std.fmt.allocPrint(req.allocator, "{f}\n", .{std.json.fmt(.{
+        .workspace = .{
+            .root = ws.root,
+            .uuid = @as([]const u8, &ws.uuid),
+        },
+    }, .{
+        .whitespace = .indent_2,
+    })});
+    try req.http.respond(res, .{
+        .extra_headers = &([_]std.http.Header{
+            .{ .name = "content-type", .value = "application/json" },
+        } ++ common_headers),
+    });
+    return true;
 }
 
 fn handleDir(req: *Request, path: []const u8) !void {
@@ -418,4 +432,8 @@ fn serveError(req: *Request, comptime reason: ?[]const u8, comptime status: std.
     }) catch |err| {
         log.warn("Error {s} serving error text {s}", .{ @errorName(err), text });
     };
+}
+
+test {
+    _ = Api;
 }

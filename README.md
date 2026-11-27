@@ -29,7 +29,8 @@ A lightweight HTTP/WebSocket development server for Zig 0.17.1+ that watches a s
 
 * **In-Process Directory Watching**: `devserver` monitors the served directory tree directly (skipping `.git` and `.zig-cache`, with debouncing) and logs all watched directories/files on setup as well as added/modified/removed entries on change events to `stderr`.
 * **Live Browser Reload**: HTML pages are injected with a small script that connects over WebSocket to `/__zig_devserver_api`. Whenever watched files change, the server pushes a newer `start_time` timestamp and the browser tab reloads.
-* **Exclusive Port Binding & Clean Shutdown**: The server binds with `reuse_address = false` and does not take over or reuse an already-bound port (failing with `AddressInUse` if the port is already in use). Sending `POST /__zig_devserver_api` with `{"action":"shutdown"}` shuts down the server cleanly.
+* **Exclusive Port Binding & Clean Shutdown**: The server prevents concurrent processes from binding the same live port (`AddressInUse`, without `SO_REUSEPORT` or Windows `SO_REUSEADDR` port-sharing), while setting `SO_REUSEADDR` alone on POSIX so restarting after active connections (`TIME_WAIT`) does not fail with `AddressInUse`. Sending `POST /__zig_devserver_api` with `{"action":"shutdown"}` shuts down the server cleanly.
+* **Chrome DevTools Automatic Workspace Folders**: Opt-in support (`--devtools` / `--devtools-dir` or `.chrome_devtools` in `build.zig`) for serving `/.well-known/appspecific/com.chrome.devtools.json` with normalized paths and a deterministic per-workspace UUID so DevTools edits map directly to your local source tree across restarts and random ports.
 * **`Run.stdio = .protocol` Integration**: `build.zig` `Run` steps use `run.stdio = .protocol;` (no `fork()` or `PPID` polling). All build server protocol messages are logged to `stderr`, while interactive server status logs are written to `/dev/tty` when available.
 
 Naturally, **DO NOT USE THIS IN PRODUCTION**. This is a development tool only.
@@ -37,8 +38,12 @@ Naturally, **DO NOT USE THIS IN PRODUCTION**. This is a development tool only.
 ## CLI Usage
 
 ```sh
-devserver watch <host> <port> <directory>   # Serve files and watch for changes (use port 0 for a random port)
-devserver help                              # Show usage (-h, --help)
+devserver [options] watch <host> <port> <directory>   # Serve files and watch for changes (use port 0 for a random port)
+devserver help                                        # Show usage (-h, --help)
+
+# Optional Chrome DevTools workspace flags:
+#   --devtools                     Expose <directory> in com.chrome.devtools.json
+#   --devtools-dir <workspace>     Expose <workspace> in com.chrome.devtools.json
 ```
 
 When invoked with `--listen=-` (by Zig's `Run.stdio = .protocol`), `devserver` always runs the watcher for both `watch <host> <port> <directory>` and `<host> <port> <directory>`. The legacy `serve` command has been removed.
@@ -47,7 +52,8 @@ You can also run the server binary through `build.zig`:
 
 ```sh
 zig build dev -Dopen-browser=index.html
-zig build run-lazypath-src
+zig build dev -Ddevtools-root=. -Dopen-browser=index.html
+zig build run-lazypath-src -Ddevtools
 zig build run-lazypath-wf
 zig build run-lazypath-option -Dserve-dir=path/to/dir
 zig build run-with-args -- 127.0.0.1 0 path/to/dir
@@ -78,6 +84,10 @@ pub fn build(b: *std.Build) void {
         // either `.serveInstall("www")` => path in `zig-out` (depends on install step),
         // or `.serveLazyPath(...)` on source or generated directories:
         .directory = .serveInstall("www"),
+
+        // optionally enable Chrome DevTools Automatic Workspace Folders
+        // (`.disabled` default, `.served_dir`, or `.serveLazyPath(b.path("src"))`):
+        .chrome_devtools = .serveLazyPath(b.path("src")),
     });
 
     // Set up a `dev` top-level step to run the server.

@@ -6,6 +6,23 @@ const Compile = Step.Compile;
 const Run = Step.Run;
 const LazyPath = std.Build.LazyPath;
 
+pub const ChromeDevTools = union(enum) {
+    /// Disable the generated Chrome DevTools workspace endpoint.
+    disabled,
+    /// Expose the served directory as the Chrome DevTools workspace root.
+    served_dir,
+    /// Expose a specific directory (e.g. `b.path("")` or `b.path("src")`) as workspace root.
+    lazypath: LazyPath,
+
+    pub fn serveRoot() @This() {
+        return .served_dir;
+    }
+
+    pub fn serveLazyPath(dir: LazyPath) @This() {
+        return .{ .lazypath = dir };
+    }
+};
+
 pub const ServerOptions = struct {
     target: ?ResolvedTarget = null,
     optimize: ?OptimizeMode = null,
@@ -18,6 +35,7 @@ pub const ServerOptions = struct {
     // true by default if `--watch` is in zig build's `argv`
     watch: ?bool = null,
     directory: ServePath,
+    chrome_devtools: ChromeDevTools = .disabled,
 };
 
 pub const ServePath = union(enum) {
@@ -68,17 +86,27 @@ pub fn build(b: *std.Build) void {
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     b.step("test", "Run unit and server integration tests").dependOn(&run_exe_unit_tests.step);
 
-    const install_html = b.addInstallFile(b.path("src/static/devserver-index.html"), "www/index.html");
+    const install_html = b.addInstallFile(b.path("src/static/index.html"), "www/index.html");
     b.getInstallStep().dependOn(&install_html.step);
 
     const port = b.option(u16, "port", "port to listen on (0 = random)") orelse 0;
     const open_browser = b.option([]const u8, "open-browser", "open the browser when server starts");
+    const devtools = b.option(bool, "devtools", "enable Chrome DevTools workspace endpoint") orelse false;
+    const devtools_root = b.option(LazyPath, "devtools-root", "custom root directory for Chrome DevTools workspace");
+    const chrome_devtools: ChromeDevTools = if (devtools_root) |lp|
+        .{ .lazypath = lp }
+    else if (devtools)
+        .served_dir
+    else
+        .disabled;
+
     {
         const dev = serveDirInternal(b, exe, .{
             .port = port,
             .watch = watch,
             .open_browser = open_browser,
             .directory = .serveInstall("www"),
+            .chrome_devtools = chrome_devtools,
         });
 
         b.step("dev", "run the server").dependOn(&dev.step);
@@ -93,6 +121,7 @@ pub fn build(b: *std.Build) void {
             .port = port,
             .open_browser = open_browser,
             .directory = .serveLazyPath(serve_dir),
+            .chrome_devtools = chrome_devtools,
         });
 
         b.step("run-lazypath-option", "run the server on a lazypath provided by the '-Dserve-dir=' option").dependOn(&watch_run.step);
@@ -103,6 +132,7 @@ pub fn build(b: *std.Build) void {
             .watch = watch,
             .open_browser = open_browser,
             .directory = .serveLazyPath(b.path("src")),
+            .chrome_devtools = chrome_devtools,
         });
 
         b.step("run-lazypath-src", "run the server on a lazypath in src").dependOn(&watch_run.step);
@@ -115,6 +145,7 @@ pub fn build(b: *std.Build) void {
             .watch = watch,
             .open_browser = open_browser,
             .directory = .serveLazyPath(wf.getDirectory()),
+            .chrome_devtools = chrome_devtools,
         });
 
         b.step("run-lazypath-wf", "run the server on a writefiles' lazypath").dependOn(&watch_run.step);
@@ -144,6 +175,15 @@ pub fn serveDirInternal(b: *std.Build, server: *Compile, opt: ServerOptions) *Ru
     //         }
     //     }
     // }
+
+    switch (opt.chrome_devtools) {
+        .disabled => {},
+        .served_dir => run.addArg("--devtools"),
+        .lazypath => |lp| {
+            run.addArg("--devtools-dir");
+            run.addDirectoryArg(lp);
+        },
+    }
 
     run.addArg("watch");
     run.addArg(opt.host);

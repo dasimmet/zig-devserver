@@ -232,11 +232,15 @@ const ProtocolSessionState = struct {
 };
 
 const usage_text =
-    \\Usage: devserver <command> [args]
+    \\Usage: devserver [options] <command> [args]
     \\
     \\Commands:
     \\  watch <host> <port> <directory>   Serve files and watch for in-process changes
     \\  help, -h, --help                  Show this help message
+    \\
+    \\Options:
+    \\  --devtools                        Enable Chrome DevTools workspace on served directory
+    \\  --devtools-dir <directory>        Enable Chrome DevTools workspace on custom directory
     \\
 ;
 
@@ -339,6 +343,125 @@ fn resolveDirArg(
     }
 }
 
+fn listenServerSocket(io: Io, address: *const Io.net.IpAddress) !Io.net.Server {
+    // On Windows, `reuse_address = false` already allows rebinding past `TIME_WAIT`
+    // without enabling WinSock `SO_REUSEADDR` port hijacking. On POSIX (Linux/macOS),
+    // `Io.net.IpAddress.listen` bundles `SO_REUSEPORT` with `SO_REUSEADDR`, so we
+    // configure `SO_REUSEADDR` alone: restarts past `TIME_WAIT` succeed while
+    // concurrent live binds still fail with `AddressInUse`.
+    if (builtin.os.tag == .windows) {
+        return address.listen(io, .{ .reuse_address = false });
+    }
+
+    const posix = std.posix;
+    const is_darwin = builtin.os.tag.isDarwin();
+    const family: posix.sa_family_t = switch (address.*) {
+        .ip4 => posix.AF.INET,
+        .ip6 => posix.AF.INET6,
+    };
+    const sock_type: u32 = posix.SOCK.STREAM | if (is_darwin or builtin.os.tag == .haiku) 0 else posix.SOCK.CLOEXEC;
+    const rc = posix.system.socket(family, sock_type, posix.IPPROTO.TCP);
+    const fd: posix.fd_t = switch (posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+        .MFILE => return error.ProcessFdQuotaExceeded,
+        .NFILE => return error.SystemFdQuotaExceeded,
+        .NOBUFS, .NOMEM => return error.SystemResources,
+        else => |e| return posix.unexpectedErrno(e),
+    };
+    errdefer {
+        const s: Io.net.Socket = .{ .handle = fd, .address = address.* };
+        s.close(io);
+    }
+
+    if (is_darwin or builtin.os.tag == .haiku) {
+        switch (posix.errno(posix.system.fcntl(fd, posix.F.SETFD, @as(usize, posix.FD_CLOEXEC)))) {
+            .SUCCESS => {},
+            else => |e| return posix.unexpectedErrno(e),
+        }
+    }
+
+    const enable: c_int = 1;
+    try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&enable));
+
+    const SockAddr = extern union {
+        any: posix.sockaddr,
+        in: posix.sockaddr.in,
+        in6: posix.sockaddr.in6,
+    };
+    var storage: SockAddr = undefined;
+    var addr_len: posix.socklen_t = switch (address.*) {
+        .ip4 => |ip4| blk: {
+            const addr_raw: *align(1) const u32 = @ptrCast(&ip4.bytes);
+            storage.in = .{
+                .port = std.mem.nativeToBig(u16, ip4.port),
+                .addr = addr_raw.*,
+            };
+            break :blk @sizeOf(posix.sockaddr.in);
+        },
+        .ip6 => |ip6| blk: {
+            storage.in6 = .{
+                .port = std.mem.nativeToBig(u16, ip6.port),
+                .flowinfo = ip6.flow,
+                .addr = ip6.bytes,
+                .scope_id = ip6.interface.index,
+            };
+            break :blk @sizeOf(posix.sockaddr.in6);
+        },
+    };
+
+    while (true) {
+        switch (posix.errno(posix.system.bind(fd, &storage.any, addr_len))) {
+            .SUCCESS => break,
+            .INTR => continue,
+            .ADDRINUSE => return error.AddressInUse,
+            .ACCES => return error.AccessDenied,
+            .ADDRNOTAVAIL => return error.AddressUnavailable,
+            else => |e| return posix.unexpectedErrno(e),
+        }
+    }
+
+    while (true) {
+        switch (posix.errno(posix.system.listen(fd, 128))) {
+            .SUCCESS => break,
+            .INTR => continue,
+            .ADDRINUSE => return error.AddressInUse,
+            else => |e| return posix.unexpectedErrno(e),
+        }
+    }
+
+    addr_len = @sizeOf(SockAddr);
+    while (true) {
+        switch (posix.errno(posix.system.getsockname(fd, &storage.any, &addr_len))) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => |e| return posix.unexpectedErrno(e),
+        }
+    }
+
+    const bound: Io.net.IpAddress = switch (storage.any.family) {
+        posix.AF.INET => .{ .ip4 = .{
+            .port = std.mem.bigToNative(u16, storage.in.port),
+            .bytes = @as(*const [4]u8, @ptrCast(&storage.in.addr)).*,
+        } },
+        posix.AF.INET6 => .{ .ip6 = .{
+            .port = std.mem.bigToNative(u16, storage.in6.port),
+            .bytes = storage.in6.addr,
+            .flow = storage.in6.flowinfo,
+            .interface = .{ .index = storage.in6.scope_id },
+        } },
+        else => address.*,
+    };
+
+    return .{
+        .socket = .{
+            .handle = fd,
+            .address = bound,
+        },
+        .options = {},
+    };
+}
+
 fn runWatchServer(
     gpa: std.mem.Allocator,
     io: Io,
@@ -347,13 +470,14 @@ fn runWatchServer(
     port: u16,
     public_dir: Io.Dir,
     public_path: []const u8,
+    devtools_workspace: ?Request.Api.DevToolsWorkspace,
     protocol_state: ?ProtocolSessionState,
     ready_state: ?*ReadyState,
 ) !void {
     errdefer if (ready_state) |r| r.notifyFailed(io);
 
     const resolved = try Io.net.IpAddress.resolve(io, host, port);
-    var tcp_server = try resolved.listen(io, .{ .reuse_address = false });
+    var tcp_server = try listenServerSocket(io, &resolved);
     defer tcp_server.deinit(io);
 
     const bound_address = tcp_server.socket.address;
@@ -391,6 +515,9 @@ fn runWatchServer(
     } else null;
 
     log.info("Serving {s} at http://{f}", .{ public_path, bound_address });
+    if (devtools_workspace) |ws| {
+        log.info("Chrome DevTools workspace: {s} (uuid={s})", .{ ws.root, &ws.uuid });
+    }
     if (open_browser_path) |path| openBrowser(gpa, io, bound_address, path);
 
     var accept_err: ?anyerror = null;
@@ -419,6 +546,7 @@ fn runWatchServer(
             .gpa = gpa,
             .public_dir = public_dir,
             .public_path = public_path,
+            .devtools_workspace = devtools_workspace,
             .stream = stream,
             .broker = &broker,
             .on_shutdown = ShutdownCoord.onShutdownCallback,
@@ -519,17 +647,26 @@ fn isHelpCommand(cmd: []const u8) bool {
         std.mem.eql(u8, cmd, "--help");
 }
 
+const DevToolsOption = union(enum) {
+    disabled,
+    served_dir,
+    custom_dir: CmdArg,
+};
+
 const ParsedCommand = union(enum) {
     help,
     watch: struct {
         host: CmdArg,
         port: CmdArg,
         dir: CmdArg,
+        devtools: DevToolsOption = .disabled,
     },
     invalid: enum {
         empty,
         non_string_command,
         serve_removed,
+        missing_devtools_dir,
+        unknown_option,
         expected_protocol_args,
         unknown_command,
         expected_watch_args,
@@ -539,28 +676,68 @@ const ParsedCommand = union(enum) {
 fn parseCommand(in_protocol: bool, cmd_args: []const CmdArg) ParsedCommand {
     if (cmd_args.len == 0) return .{ .invalid = .empty };
 
-    const first = cmd_args[0].asString() orelse return .{ .invalid = .non_string_command };
-    if (isHelpCommand(first)) return .help;
+    var devtools: DevToolsOption = .disabled;
+    var pos: [4]CmdArg = undefined;
+    var pos_len: usize = 0;
+    var total_pos: usize = 0;
+
+    var i: usize = 0;
+    while (i < cmd_args.len) : (i += 1) {
+        const arg = cmd_args[i];
+        if (arg.asString()) |s| {
+            if (isHelpCommand(s)) return .help;
+            if (std.mem.eql(u8, s, "--devtools")) {
+                devtools = .served_dir;
+                continue;
+            }
+            if (std.mem.eql(u8, s, "--devtools-dir")) {
+                if (i + 1 >= cmd_args.len) return .{ .invalid = .missing_devtools_dir };
+                i += 1;
+                devtools = .{ .custom_dir = cmd_args[i] };
+                continue;
+            }
+            if (std.mem.startsWith(u8, s, "--devtools-dir=")) {
+                const val = s["--devtools-dir=".len..];
+                if (val.len == 0) return .{ .invalid = .missing_devtools_dir };
+                devtools = .{ .custom_dir = .{ .string = val } };
+                continue;
+            }
+            if (std.mem.startsWith(u8, s, "-")) {
+                return .{ .invalid = .unknown_option };
+            }
+        }
+        if (pos_len < pos.len) {
+            pos[pos_len] = arg;
+            pos_len += 1;
+        }
+        total_pos += 1;
+    }
+
+    if (total_pos == 0) return .{ .invalid = .empty };
+
+    const first = pos[0].asString() orelse return .{ .invalid = .non_string_command };
     if (std.mem.eql(u8, first, "serve")) return .{ .invalid = .serve_removed };
 
     // When `--listen=-` is provided, always run the watch command: accept either explicit
     // `watch <host> <port> <directory>` (4 args) or `<host> <port> <directory>` (3 args).
     if (in_protocol and !std.mem.eql(u8, first, "watch")) {
-        if (cmd_args.len != 3) return .{ .invalid = .expected_protocol_args };
+        if (total_pos != 3) return .{ .invalid = .expected_protocol_args };
         return .{ .watch = .{
-            .host = cmd_args[0],
-            .port = cmd_args[1],
-            .dir = cmd_args[2],
+            .host = pos[0],
+            .port = pos[1],
+            .dir = pos[2],
+            .devtools = devtools,
         } };
     }
 
     if (!std.mem.eql(u8, first, "watch")) return .{ .invalid = .unknown_command };
-    if (cmd_args.len != 4) return .{ .invalid = .expected_watch_args };
+    if (total_pos != 4) return .{ .invalid = .expected_watch_args };
 
     return .{ .watch = .{
-        .host = cmd_args[1],
-        .port = cmd_args[2],
-        .dir = cmd_args[3],
+        .host = pos[1],
+        .port = pos[2],
+        .dir = pos[3],
+        .devtools = devtools,
     } };
 }
 
@@ -583,9 +760,11 @@ fn dispatchCommand(
                 .empty => {},
                 .non_string_command => log.err("first argument must be a string", .{}),
                 .serve_removed => log.err("unknown command 'serve' (use 'watch' instead)", .{}),
-                .expected_protocol_args => log.err("expected 3 or 4 arguments in --listen=- mode: [watch] <host> <port> <directory>", .{}),
-                .unknown_command => log.err("unknown command '{s}'", .{cmd_args[0].asString().?}),
-                .expected_watch_args => log.err("expected 4 arguments: watch <host> <port> <directory>", .{}),
+                .missing_devtools_dir => log.err("--devtools-dir requires a directory argument", .{}),
+                .unknown_option => log.err("unknown option in arguments", .{}),
+                .expected_protocol_args => log.err("expected 3 or 4 positional arguments in --listen=- mode: [watch] <host> <port> <directory>", .{}),
+                .unknown_command => log.err("unknown command", .{}),
+                .expected_watch_args => log.err("expected 4 positional arguments: watch <host> <port> <directory>", .{}),
             }
             writeUsage(io, in_protocol);
             return .failed;
@@ -615,6 +794,21 @@ fn dispatchCommand(
         gpa.free(resolved.path);
     }
 
+    const devtools_workspace: ?Request.Api.DevToolsWorkspace = switch (watch_args.devtools) {
+        .disabled => null,
+        .served_dir => try Request.Api.DevToolsWorkspace.init(gpa, resolved.path),
+        .custom_dir => |dt_arg| blk: {
+            var dt_resolved = resolveDirArg(io, gpa, dt_arg) catch |err| {
+                log.err("failed to open devtools workspace directory: {s}", .{@errorName(err)});
+                return .failed;
+            };
+            dt_resolved.dir.close(io);
+            defer gpa.free(dt_resolved.path);
+            break :blk try Request.Api.DevToolsWorkspace.init(gpa, dt_resolved.path);
+        },
+    };
+    defer if (devtools_workspace) |ws| ws.deinit(gpa);
+
     try runWatchServer(
         gpa,
         io,
@@ -623,6 +817,7 @@ fn dispatchCommand(
         port,
         resolved.dir,
         resolved.path,
+        devtools_workspace,
         protocol_state,
         null,
     );
@@ -731,9 +926,10 @@ fn runWatchForTest(
     port: u16,
     public_dir: Io.Dir,
     public_path: []const u8,
+    devtools_workspace: ?Request.Api.DevToolsWorkspace,
     ready_state: *ReadyState,
 ) void {
-    runWatchServer(gpa, io, null, host, port, public_dir, public_path, null, ready_state) catch |err| {
+    runWatchServer(gpa, io, null, host, port, public_dir, public_path, devtools_workspace, null, ready_state) catch |err| {
         log.err("test server failed: {s}", .{@errorName(err)});
     };
 }
@@ -781,9 +977,39 @@ test "parseCommand removes serve and defaults --listen=- to watch" {
     const help_arg = [_]CmdArg{.{ .string = "help" }};
     try std.testing.expect(parseCommand(false, &help_arg) == .help);
     try std.testing.expect(parseCommand(true, &help_arg) == .help);
+
+    const devtools_served = [_]CmdArg{
+        .{ .string = "--devtools" },
+        .{ .string = "watch" },
+        .{ .string = "127.0.0.1" },
+        .{ .string = "0" },
+        .{ .string = "." },
+    };
+    switch (parseCommand(false, &devtools_served)) {
+        .watch => |w| try std.testing.expect(w.devtools == .served_dir),
+        else => return error.UnexpectedParsedCommand,
+    }
+
+    const devtools_custom = [_]CmdArg{
+        .{ .string = "--devtools-dir" },
+        .{ .string = "src" },
+        .{ .string = "127.0.0.1" },
+        .{ .string = "0" },
+        .{ .string = "." },
+    };
+    switch (parseCommand(true, &devtools_custom)) {
+        .watch => |w| switch (w.devtools) {
+            .custom_dir => |arg| try std.testing.expectEqualStrings("src", arg.asString().?),
+            else => return error.UnexpectedParsedCommand,
+        },
+        else => return error.UnexpectedParsedCommand,
+    }
+
+    const missing_dt = [_]CmdArg{.{ .string = "--devtools-dir" }};
+    try std.testing.expectEqual(ParsedCommand{ .invalid = .missing_devtools_dir }, parseCommand(false, &missing_dt));
 }
 
-test "runWatchServer handles GET HTML injection, directory listing, and POST shutdown cleanly" {
+test "runWatchServer handles GET HTML injection, directory listing, DevTools JSON, and POST shutdown cleanly" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
@@ -800,6 +1026,9 @@ test "runWatchServer handles GET HTML injection, directory listing, and POST shu
     const path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(path);
 
+    const devtools_ws = try Request.Api.DevToolsWorkspace.init(gpa, "/custom/workspace/root");
+    defer devtools_ws.deinit(gpa);
+
     const server_thread = try std.Thread.spawn(.{}, runWatchForTest, .{
         gpa,
         io,
@@ -807,9 +1036,11 @@ test "runWatchServer handles GET HTML injection, directory listing, and POST shu
         0,
         tmp.dir,
         path,
+        devtools_ws,
         &ready,
     });
-    defer server_thread.join();
+    var joined = false;
+    defer if (!joined) server_thread.join();
 
     while (ready.state.load(.acquire) == 0) {
         io.futexWaitUncancelable(u32, &ready.state.raw, 0);
@@ -861,11 +1092,59 @@ test "runWatchServer handles GET HTML injection, directory listing, and POST shu
         try std.testing.expect(std.mem.indexOf(u8, resp, Request.Api.injected_js) != null);
     }
 
-    // 3. Port reuse is disallowed: attempting to bind the same port returns AddressInUse.
-    try std.testing.expectError(error.AddressInUse, addr.listen(io, .{ .reuse_address = false }));
+    // 3. Chrome DevTools workspace JSON (`GET` -> 200, `POST` -> 405, static file override).
+    {
+        const stream = try addr.connect(io, .{ .mode = .stream });
+        defer stream.close(io);
 
-    // 4. Shutdown via API stops both HTTP server and watcher thread.
+        var send_buf: [512]u8 = undefined;
+        var recv_buf: [4096]u8 = undefined;
+        var writer = stream.writer(io, &send_buf);
+        var reader = stream.reader(io, &recv_buf);
+
+        try writer.interface.writeAll(
+            "GET /.well-known/appspecific/com.chrome.devtools.json?check=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        try writer.interface.flush();
+
+        const resp = try reader.interface.allocRemaining(gpa, .limited(64 * 1024));
+        defer gpa.free(resp);
+
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 200 OK"));
+        try std.testing.expect(std.mem.indexOf(u8, resp, "\"/custom/workspace/root\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp, &devtools_ws.uuid) != null);
+    }
+    {
+        const stream = try addr.connect(io, .{ .mode = .stream });
+        defer stream.close(io);
+
+        var send_buf: [512]u8 = undefined;
+        var recv_buf: [4096]u8 = undefined;
+        var writer = stream.writer(io, &send_buf);
+        var reader = stream.reader(io, &recv_buf);
+
+        try writer.interface.writeAll(
+            "POST /.well-known/appspecific/com.chrome.devtools.json HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        try writer.interface.flush();
+
+        const resp = try reader.interface.allocRemaining(gpa, .limited(64 * 1024));
+        defer gpa.free(resp);
+
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 405"));
+    }
+
+    // 4. Concurrent port reuse is disallowed (`AddressInUse`), while immediate rebind
+    // after shutdown succeeds even with prior TCP connections in `TIME_WAIT`.
+    try std.testing.expectError(error.AddressInUse, listenServerSocket(io, &addr));
+
+    // 5. Shutdown via API stops both HTTP server and watcher thread.
     try std.testing.expect(try sendShutdownForTest(gpa, io, addr));
+    server_thread.join();
+    joined = true;
+
+    var rebound = try listenServerSocket(io, &addr);
+    rebound.deinit(io);
 }
 
 fn sendShutdownForTest(gpa: std.mem.Allocator, io: Io, target: Io.net.IpAddress) !bool {
